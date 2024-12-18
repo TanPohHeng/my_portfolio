@@ -133,8 +133,6 @@ struct DLL_API WP_Physics3D : WP_Component
 	WP_Physics3D& operator=(WP_Physics3D&& _ref) noexcept;
 	WP_Physics3D& operator=(WP_Physics3D const& _ref);
 
-
-
 	void Init() override;
 
 	void OnEnabled() override;
@@ -147,10 +145,15 @@ struct DLL_API WP_Physics3D : WP_Component
 	void AddCharacter(JPH::ShapeSettings::ShapeResult const& _shape);
 	void RemoveCharacter();
 
-	//Not for milestone 1
-	void SetScale(float);					//deprecated
-	void SetScaleCube(glm::vec3 const&);	//deprecated
-	void SetScaleSphere(float);				//deprecated
+	//Remove Box collider dependency, set scale functions 
+	void SetScaleUniform(float _uniformScale);						//set a uniform scale for the shape
+	void SetScale(glm::vec3 const& _scale);							//set a scale for any shape
+	void SetScaleCube(glm::vec3 const& _xyzScale);					//set a scale for a cube scale
+	void SetScaleSphere(float _radius);								//set a scale for a sphere scale
+	void SetScaleCapsule(float _radius, float _height);				//set a scale for a capsule scale
+	void SetScaleCylinder(float _radius, float _height);			//set a scale for a cylinder scale
+
+	glm::vec3 const& GetScale() const;								//set a uniform scale for the shape
 
 	//is static, dynamic, kinematic
 	JPH::EMotionType GetMotionType() const;
@@ -234,11 +237,14 @@ struct DLL_API WP_Physics3D : WP_Component
 	float							m_maxSlopeAngleRadians	{JPH::DegreesToRadians(50.0f)};		//maximum slope the body can climb, not used if phsyics body is not a character
 	float							m_maxSeperationDistance	{1.0f};								//maximum distance the character can be floating off the slope.
 
+	glm::vec3						m_shapeScale			{ 0.5f, 0.5f, 0.5f };				//scale of the shape 
+
+	std::unique_ptr<JPH::Character>	m_charPtr				{nullptr};							//store pointer to character.
+
 	JPH::Vec3						m_posOffset				{JPH::Vec3::sZero()};				//stored offset for position
 	JPH::Quat						m_rotOffset				{JPH::Quat::sIdentity()};			//stored offset for rotation
 	//JPH::Mat44						m_offsetTransform		{JPH::Mat44::sIdentity()};		//store all transform offset as mat44
 
-	std::unique_ptr<JPH::Character>	m_charPtr				{nullptr};							//store pointer to character.
 
 
 	//store all shape settings for now (deprecated)

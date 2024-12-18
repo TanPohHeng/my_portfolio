@@ -34,6 +34,10 @@
 #define JPH_MULTI_THREAD 1
 #endif
 
+#ifndef MAX_PHYSICS_UPDATES_PER_FRAME
+#define MAX_PHYSICS_UPDATES_PER_FRAME 2
+#endif
+
 
 //class pre-declarations
 class WP_PhysicsSystem;
@@ -604,6 +608,7 @@ private:
 	//Hide all JPH stuff from users
 	bool										m_isPhysicsLocked = false;
 	bool										m_isPhysicsReloaded = false;
+	int											m_maxPhysicsSteps;
 	JPH::PhysicsSystem							m_physics_system;
 
 	std::unique_ptr<JPH::TempAllocator>			temp_allocator = nullptr;

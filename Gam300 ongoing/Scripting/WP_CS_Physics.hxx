@@ -1,7 +1,7 @@
 /*!
 * @file			WP_CS_Physic.hxx
-* @author		Emma Natalie Soh
-* @par			Emma: Email: e.soh\@digipen.edu
+* @author		Emma Natalie Soh, Tan Poh Heng
+* @par			Emma: Email: e.soh\@digipen.edu , t.pohheng@digipen.edu
 * @par			Course: CSD3401 Software Engineering Project 5
 * @date			23 October 2024
 *

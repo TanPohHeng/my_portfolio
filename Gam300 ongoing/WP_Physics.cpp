@@ -119,7 +119,12 @@ RTTR_REGISTRATION
 		(
 			rttr::metadata(MetaDataTypes::DISABLE_ON_RUN_IMGUI,true)
 		)
-	//.property("m_layer", &WP_Physics3D::GetObjectLayer, &WP_Physics3D::SetObjectLayer)
+		.property("m_shapeScale", &WP_Physics3D::GetScale, &WP_Physics3D::SetScale)
+		(
+			rttr::metadata(MetaDataTypes::DISABLE_ON_RUN_IMGUI,true),
+			rttr::metadata(MetaDataTypes::PHYSICS_SHAPE_SCALE,true)
+		)
+		//.property("m_layer", &WP_Physics3D::GetObjectLayer, &WP_Physics3D::SetObjectLayer)
 		.property("m_active", &WP_Physics3D::GetIsActive, &WP_Physics3D::SetIsActive)
 		.property("m_pureStatic", &WP_Physics3D::GetIsPureStatic, &WP_Physics3D::SetIsPureStatic)
 		(
@@ -313,19 +318,59 @@ WP_Physics3D& WP_Physics3D::operator=(WP_Physics3D const& _ref)
 	return *this;
 }
 
-void WP_Physics3D::SetScaleCube(glm::vec3 const&)
+void WP_Physics3D::SetScaleUniform(float _uniformScale)
 {
+	m_shapeScale = glm::vec3{_uniformScale,_uniformScale ,_uniformScale };
+}
 
+void WP_Physics3D::SetScale(glm::vec3 const& _scale)
+{
+	switch (m_shapeType) 
+	{
+	case WP_PhysicsShape::EMPTY:
+		return;
+	case WP_PhysicsShape::SPHERE:				//sphere, use x axis only
+		SetScaleSphere(_scale.x);
+		return;
+	case WP_PhysicsShape::CUBE:					//cube
+		SetScaleCube(_scale);
+		return;
+	case WP_PhysicsShape::CAPSULE:				//capsule, use x and y axis only
+		SetScaleCapsule(_scale.x, _scale.y);
+		return;
+	case WP_PhysicsShape::CYLINDER:
+		SetScaleCylinder(_scale.x, _scale.y);	//cylinder, use x and y axis only
+		return;
+	default:
+		assert(0 && "Invalid Shape type found,  WP_Physics3D::SetScale(glm::vec3 const& _scale)");
+		WP_ERROR("Invalid Shape type found,  WP_Physics3D::SetScale(glm::vec3 const& _scale)");
+		return;
+	}
+}
+
+void WP_Physics3D::SetScaleCube(glm::vec3 const& _xyzScale)
+{
+	m_shapeScale = _xyzScale;
 }
 
 void WP_Physics3D::SetScaleSphere(float _newRadius)
 {
-	auto const& shape = WP_PhysicsSystem::GetInstance()->GetPhysicsBI().GetShape(m_bID);
-	if (shape->GetSubType() != JPH::EShapeSubType::Sphere)
-	{
-		return;
-	}
-	//m_sphereSetting.mRadius = _newRadius;
+	m_shapeScale = glm::vec3{ _newRadius, _newRadius ,_newRadius };
+}
+
+void WP_Physics3D::SetScaleCapsule(float _radius, float _height)
+{
+	m_shapeScale = glm::vec3{ _radius, _height ,_radius };
+}
+
+void WP_Physics3D::SetScaleCylinder(float _radius, float _height)
+{
+	m_shapeScale = glm::vec3{ _radius, _height ,_radius };
+}
+
+glm::vec3 const& WP_Physics3D::GetScale() const
+{
+	return m_shapeScale;
 }
 
 JPH::EMotionType WP_Physics3D::GetMotionType() const
@@ -603,28 +648,36 @@ void WP_Physics3D::AddBody()
 	switch (m_shapeType)	//get appropriate shape settings with default values
 	{
 	case WP_PhysicsShape::EMPTY:
-	case WP_PhysicsShape::NUM_PHYSICS_SHAPES:
+	case WP_PhysicsShape::NUM_PHYSICS_SHAPES:	//expected fall through
 		shapeSettingsPtr = std::make_unique<JPH::EmptyShapeSettings>();
+		m_shapeType = WP_PhysicsShape::EMPTY;							//reset to 
 		break;
 	case WP_PhysicsShape::CUBE:
-		glm::mat4 scaleMat = glm::mat4();
 		
+#ifndef IF_BOX_COLLIDER_DEPENDENT	//no dependency on box collider
 		//calculate global scale
 		//assume no position or angle offset
 		//just to make it work currently
-		scaleMat = glm::scale(scaleMat, boxComp->m_scale);
-		glm::vec3 otherScale = transComp->m_globalScale;
-		otherScale.x = otherScale.x / 2 * boxComp->m_scale.x;
-		otherScale.y = otherScale.y / 2 * boxComp->m_scale.y;
-		otherScale.z = otherScale.z / 2 * boxComp->m_scale.z;
-
-
-		shapeSettingsPtr = std::make_unique<JPH::BoxShapeSettings>(WP_Physics::ToJoltVec3(otherScale));
+		if(boxComp)
+		{
+			glm::mat4 scaleMat = glm::mat4();
+			scaleMat = glm::scale(scaleMat, boxComp->m_scale);
+			glm::vec3 otherScale = transComp->m_globalScale;
+			otherScale.x = otherScale.x / 2 * boxComp->m_scale.x;
+			otherScale.y = otherScale.y / 2 * boxComp->m_scale.y;
+			otherScale.z = otherScale.z / 2 * boxComp->m_scale.z;
+			shapeSettingsPtr = std::make_unique<JPH::BoxShapeSettings>(WP_Physics::ToJoltVec3(otherScale));
+		}
+		else 
+		{
+			shapeSettingsPtr = std::make_unique<JPH::BoxShapeSettings>(WP_Physics::ToJoltVec3(m_shapeScale));
+		}
+#endif
+		
 		break;
 	case WP_PhysicsShape::SPHERE:
 	{	//create sphere with all avg scale
-		float avgScaleInAllAxis{ (transComp->m_scale.x + transComp->m_scale.y + transComp->m_scale.z) / 3 };
-		shapeSettingsPtr = std::make_unique<JPH::SphereShapeSettings>(avgScaleInAllAxis);
+		shapeSettingsPtr = std::make_unique<JPH::SphereShapeSettings>(m_shapeScale.x);
 	}
 #if 0
 	{	//reference to get to settings from a generic shape unique pointer
@@ -634,14 +687,12 @@ void WP_Physics3D::AddBody()
 	break;
 	case WP_PhysicsShape::CAPSULE:
 	{
-		float avgScaleInXZAxis{ (transComp->m_scale.x + transComp->m_scale.z) / 2 };
-		shapeSettingsPtr = std::make_unique<JPH::CapsuleShapeSettings>(transComp->m_scale.y, avgScaleInXZAxis);
+		shapeSettingsPtr = std::make_unique<JPH::CapsuleShapeSettings>(m_shapeScale.y, m_shapeScale.x);
 	}
 	break;
 	case WP_PhysicsShape::CYLINDER:
 	{
-		float avgScaleInXZAxis{ (transComp->m_scale.x + transComp->m_scale.z) / 2 };
-		shapeSettingsPtr = std::make_unique<JPH::CapsuleShapeSettings>(transComp->m_scale.y, avgScaleInXZAxis);
+		shapeSettingsPtr = std::make_unique<JPH::CapsuleShapeSettings>(m_shapeScale.y, m_shapeScale.x);
 	}
 	break;
 	default:

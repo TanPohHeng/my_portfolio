@@ -33,6 +33,10 @@ assert(pComp);																						\
 #ifndef JPH_MULTI_THREAD
 #define JPH_MULTI_THREAD 0
 #endif
+
+#ifndef MAX_PHYSICS_STEPS	//use this for modulo operations.
+#define MAX_PHYSICS_STEPS (MAX_PHYSICS_UPDATES_PER_FRAME * m_maxPhysicsSteps + 1)
+#endif
 }
 
 #ifndef DELAYED_PHYSICS_P1
@@ -524,6 +528,8 @@ WP_PhysicsSystem::WP_PhysicsSystem()
 
 	m_physics_system.SetGravity(JPH::Vec3(0, -9.81f, 0));
 
+	m_maxPhysicsSteps = (int)(thread::hardware_concurrency()) - 1;
+
 	//m_physics_system.SaveState(m_defaultState);
 
 	//m_eventSubscribers[0] = std::make_pair(EventType::kEditorPressPlay,
@@ -687,6 +693,7 @@ bool WP_PhysicsSystem::GetIsPhysicsLocked() const { return m_isPhysicsLocked; }
 
 void WP_PhysicsSystem::OnUpdate()
 {
+	static unsigned int s_rollbackFrames = 0;
 	//================================================================
 	//					Actual Physics Update
 	//======================VVVVVVVVVVVVVVV===========================
@@ -694,11 +701,11 @@ void WP_PhysicsSystem::OnUpdate()
 	const float cDeltaTime = WP_TimerSystem::GetInstance()->GetDT();
 
 	// Now we're ready to simulate the body, keep simulating until it goes to sleep
-	static JPH::uint step = 0;
+	//static JPH::uint step = 0;
 	//if (GetPhysicsBI().IsActive(sphere_id))	//remove before Milestone 1! M1_TODO
 	{
 		// Next step
-		++step;
+		//++step;
 
 		// Output current position and velocity of the sphere
 		//{
@@ -708,11 +715,29 @@ void WP_PhysicsSystem::OnUpdate()
 		//}
 		// If you take larger steps than 1 / 60th of a second you need to do multiple collision steps in order to keep the simulation stable. Do 1 collision step per 1 / 60th of a second (round up).
 		const int cCollisionSteps = static_cast<int>(std::ceilf(cDeltaTime / (1.0f / 60.0f)));
+		int collisionStepsThisUpdate{cCollisionSteps};
+
+		//if collision steps exceed the max number of rollback frames, 
+		if (cCollisionSteps > (MAX_PHYSICS_UPDATES_PER_FRAME * m_maxPhysicsSteps))
+		{	//rollback all frames above max collision steps into next frame
+			s_rollbackFrames += (cCollisionSteps - MAX_PHYSICS_UPDATES_PER_FRAME * m_maxPhysicsSteps);
+			collisionStepsThisUpdate = MAX_PHYSICS_UPDATES_PER_FRAME * m_maxPhysicsSteps;
+		}
+		//if not max number of collision steps and there are some rollback frames, 
+		if (s_rollbackFrames > 0 && cCollisionSteps < (MAX_PHYSICS_UPDATES_PER_FRAME * m_maxPhysicsSteps))
+		{	//do some rollback frames 
+			int oldRollbackFrames = s_rollbackFrames;	//save old number of rollback frames
+			//make rollback frames the remainder after taking enough frames to make step the max amount of updates this frame
+			s_rollbackFrames = (cCollisionSteps + s_rollbackFrames) % MAX_PHYSICS_STEPS;
+			//make number of collision steps this frame to be the number of collision steps
+			collisionStepsThisUpdate = cCollisionSteps + oldRollbackFrames - s_rollbackFrames;
+		}
+
 		//auto& phyCompVec = WP_ComponentList<WP_Physics3D>::GetComponentList()->GetComponentVector();
 		auto&& phyCompVec = WP_ComponentSystem::WP_ComponentSystemIterator<WP_Physics3D>();
 		for (WP_Physics3D& t : phyCompVec)
 		{	//Trans -> Physics
-//TO_TEST: Point of failure, rotation and position offsets
+			//TO_TEST: Point of failure, rotation and position offsets
 			using namespace WP_Physics;
 			auto transComp = WP_ComponentList<WP_Transform3D>::GetComponentList()->GetComponent(t.GetGameObjectID());
 
@@ -775,11 +800,25 @@ void WP_PhysicsSystem::OnUpdate()
 			//Vec3 velocity = GetPhysicsBI().GetLinearVelocity(t.m_bID);
 			//cout << "ID [" << (t.m_bID.GetIndex()) << "]Step " << step << ": Position = (" << position.GetX() << ", " << position.GetY() << ", " << position.GetZ() << "), Velocity = (" << velocity.GetX() << ", " << velocity.GetY() << ", " << velocity.GetZ() << ")" << endl;
 		}
-		m_isPhysicsLocked = true;
+		m_isPhysicsLocked = true;	//locked physics, all calls to setting functions are delayed
+		
+		while (cCollisionSteps && collisionStepsThisUpdate != 0)	//MAX_PHYSICS_UPDATES_PER_FRAME number of physics update loops
+		{
+			//find number of steps this update. must be less than hardware concurrency -1.
+			int steps = (collisionStepsThisUpdate % (m_maxPhysicsSteps + 1));
+			steps = (steps) ? steps: m_maxPhysicsSteps;
+			//find DT fraction to complete these steps
+			float thisUpdateDT = WP_TimerSystem::GetInstance()->GetFixedDT() * steps;
+			//remove these steps from the number of steps we need this frame.
+			collisionStepsThisUpdate -= steps;
 		// Step the world
-		if (cCollisionSteps)	//if no collisions this frame, skip update
-			m_physics_system.Update(cDeltaTime, cCollisionSteps, &*temp_allocator, &*job_system);
-		m_isPhysicsLocked = false;
+		if (steps)	//if no collisions this frame, skip update
+			m_physics_system.Update(thisUpdateDT, steps, &*temp_allocator, &*job_system);
+		}
+
+		
+		
+		m_isPhysicsLocked = false;	//unlocked physics
 		//run contact callback
 		m_ContactListener.CallbackAllContacts();
 		//remove contact event
