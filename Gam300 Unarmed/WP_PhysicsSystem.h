@@ -9,6 +9,7 @@
 #include <Jolt/Core/TempAllocator.h>
 #include <Jolt/Core/JobSystemThreadPool.h>				//multi-thread job system
 #include <Jolt/Core/JobSystemSingleThreaded.h>			//single job system
+#include <Jolt/Geometry/OrientedBox.h>
 #include <Jolt/Physics/PhysicsSettings.h>
 #include <Jolt/Physics/PhysicsSystem.h>
 #include <Jolt/Physics/Collision/Shape/Shape.h>
@@ -23,6 +24,7 @@
 #include <Jolt/Physics/Collision/CollisionCollectorImpl.h>
 #include <Jolt/Physics/StateRecorderImpl.h>
 #include <map>
+#include <bitset>
 
 //would be ideal to move each class to different files
 //DebugRenderer for debug integration??
@@ -31,13 +33,16 @@
 #endif // !Debug_Physics_Contact
 
 #ifndef JPH_MULTI_THREAD
-#define JPH_MULTI_THREAD 1
+#define JPH_MULTI_THREAD 0
 #endif
 
 #ifndef MAX_PHYSICS_UPDATES_PER_FRAME
 #define MAX_PHYSICS_UPDATES_PER_FRAME 2
 #endif
 
+#ifndef PHYSICS_LAYER_RELATIONS_USE_BITSET
+#define PHYSICS_LAYER_RELATIONS_USE_BITSET 1
+#endif
 
 //class pre-declarations
 class WP_PhysicsSystem;
@@ -48,6 +53,9 @@ class WP_ContactListener;					//call contact object body id's callback function,
 class WP_BodyActivationListener;			//call while collision active
 class PhysicsSetFunction;
 
+//struct
+struct WP_PhysicsShapeCastSetting;			//pass for shape casting.
+struct WP_CastShapeResult;
 
 #ifndef TEMPLATE_PHYSICS_DELAY_CALLBACK
 #define TEMPLATE_PHYSICS_DELAY_CALLBACK
@@ -183,7 +191,8 @@ public:
 	template<typename T, typename U>
 	SetPhysicsDelayed5(WP_GameObjectID _id, T _p1, U _p2, V _p3, W _p4, X _p5)
 		: PhysicsSetFunction{ _id }, m_param1{ _p1 }, m_param2{ _p2 }, m_param3{ _p3 }, m_param4{ _p4 }, m_param5{ _p5 }
-	{/*Empty By Design*/};
+	{/*Empty By Design*/
+	};
 
 	void operator()() override {
 		if constexpr (_Func != nullptr)
@@ -267,7 +276,7 @@ namespace WP_Physics
 	{
 	public:
 		WP_ContactManifold(JPH::ContactManifold const& _manifold);
-		WP_ContactManifold& operator=(WP_ContactManifold const &) = delete;
+		WP_ContactManifold& operator=(WP_ContactManifold const&) = delete;
 
 		inline glm::vec3 GetWorldSpaceContactPointOn1(uint16_t _inIndex) const;
 		inline glm::vec3 GetWorldSpaceContactPointOn2(uint16_t _inIndex) const;
@@ -312,8 +321,58 @@ namespace WP_Physics
 		glm::vec3 m_relativeLinearSurfaceVelocity;
 		glm::vec3 m_relativeAngularSurfaceVelocity;
 	private:
-		JPH::ContactSettings & m_contactSettings;
+		JPH::ContactSettings& m_contactSettings;
 	};
+
+	constexpr int s_objectLayerCollisionArraySize = (JPH_OBJECT_LAYER_BITS * (JPH_OBJECT_LAYER_BITS+1))/2;
+
+
+	//================================================================================
+	//				Struct to track layer interactions for physics
+	//================================================================================
+	struct alignas(8) WP_PhysicsObjectLayer 
+	{
+		struct WP_PhysicsObjectLayerHelper	//help read 1D bits as 2D array
+		{
+			struct WP_PhysicsLayerRelation	//represent bitset bit
+			{
+				WP_PhysicsLayerRelation(WP_PhysicsLayerRelation&) = default;		//default copy constructor
+				WP_PhysicsLayerRelation(unsigned _index1D, WP_PhysicsObjectLayerHelper& _origin);
+				operator bool();										//allow this struct be used in place of a bool
+				WP_PhysicsLayerRelation& operator=(bool _newVal);		//set bit
+
+			private:
+				WP_PhysicsObjectLayerHelper& m_parent;
+				unsigned m_pos;											//position of the bit in the bitset in 1D
+			};
+
+			WP_PhysicsObjectLayerHelper(unsigned _index1, WP_PhysicsObjectLayer& _parent);
+			WP_PhysicsLayerRelation operator[](unsigned _index2);
+
+		private:
+			unsigned m_index1;
+			WP_PhysicsObjectLayer& m_parent;
+		};
+		WP_PhysicsObjectLayer();
+		WP_PhysicsObjectLayerHelper operator[](unsigned _index2);
+
+		using physicsCharLayerArr = char[JPH_OBJECT_LAYER_BITS];	//allow array reference parameter
+		//default boolean determines if it collides with 
+		void setLayerReaction(JPH::ObjectLayer _layer, physicsCharLayerArr const& _layerReaction, bool _broadphaseLayerIsMoving = true);
+		void setLayerReaction(JPH::ObjectLayer _layer, JPH::ObjectLayer const& _layerReactionMask, bool _broadphaseLayerIsMoving = true);
+		bool getLayerIsMovingLayer(JPH::ObjectLayer _layer);
+
+#if PHYSICS_LAYER_RELATIONS_USE_BITSET
+		std::bitset<s_objectLayerCollisionArraySize> m_objectLayerCollisionRelation;	//1D array representing half of the physics interaction matrix plus the center diagonal.
+		std::bitset<JPH_OBJECT_LAYER_BITS> m_objectLayerBroadphaseLayer;	//1 =  collide with static broadphase layers, is a moving layer
+#else
+		char m_objectLayerCollisionRelation[s_objectLayerCollisionArraySize];	//store lower half triangle of collision relations
+		char m_objectLayerBroadphaseLayer[JPH_OBJECT_LAYER_BITS];
+#endif
+		
+	};
+
+	std::ostream& operator<<(std::ostream& _os, WP_PhysicsObjectLayer& _layerLogic);	//debug and print layer collision chart
 
 	JPH::Vec4 operator+(JPH::Vec4 const&, glm::vec3 const&);	//manually add values
 	JPH::Vec4 operator-(JPH::Vec4 const&, glm::vec3 const&);
@@ -344,6 +403,9 @@ namespace WP_Physics
 
 	JPH::Quat NormalizeJPHQuat(JPH::Quat const& _quat);	//prevent divide by zero error for all JPH quarternions when normalizing.
 	JPH::Quat InverseJPHQuat(JPH::Quat const& _quat);	//prevent divide by zero error for all JPH quarternions when inversing.
+
+	glm::vec3 ToEulerAnglesDegrees(JPH::Quat const& _quat);
+	glm::vec3 ToEulerAnglesDegrees(glm::quat const& _quat);
 }
 
 // Layer that objects can be in, determines which other objects it can collide with
@@ -362,12 +424,12 @@ namespace Layers
 
 	static constexpr JPH::ObjectLayer NUM_LAYERS = 6;
 
-	static constexpr JPH::ObjectLayer s_nonMovingLayerMask = (1 << Layers::MOVING | 1 << Layers::DEBRIES | 1 << Layers::WEAPON);
-	static constexpr JPH::ObjectLayer s_movingLayerMask = (1 << Layers::NON_MOVING | 1 << Layers::MOVING | 1 << Layers::SENSOR);
-	static constexpr JPH::ObjectLayer s_sensorLayerMask = (1 << Layers::MOVING);
-	static constexpr JPH::ObjectLayer s_debriesLayerMask = (1 << Layers::NON_MOVING);
-	static constexpr JPH::ObjectLayer s_bulletLayerMask = (1 << Layers::WEAPON);
-	static constexpr JPH::ObjectLayer s_weaponLayerMask = (1 << Layers::NON_MOVING | 1 << Layers::BULLET);
+	static constexpr JPH::ObjectLayer s_nonMovingLayerMaskDefault = (1 << Layers::MOVING | 1 << Layers::DEBRIES | 1 << Layers::WEAPON);
+	static constexpr JPH::ObjectLayer s_movingLayerMaskDefault = (1 << Layers::NON_MOVING | 1 << Layers::MOVING | 1 << Layers::SENSOR);
+	static constexpr JPH::ObjectLayer s_sensorLayerMaskDefault = (1 << Layers::MOVING);
+	static constexpr JPH::ObjectLayer s_debriesLayerMaskDefault = (1 << Layers::NON_MOVING);
+	static constexpr JPH::ObjectLayer s_bulletLayerMaskDefault = (1 << Layers::WEAPON);
+	static constexpr JPH::ObjectLayer s_weaponLayerMaskDefault = (1 << Layers::NON_MOVING | 1 << Layers::BULLET);
 };
 
 namespace BroadPhaseLayers
@@ -391,23 +453,61 @@ public:
 		switch (inObject1)
 		{	//find if layers collide
 		case NON_MOVING:
-			return (1 << inObject2) & s_nonMovingLayerMask;
+			return (1 << inObject2) & s_nonMovingLayerMaskDefault;
 		case MOVING:
-			return (1 << inObject2) & s_movingLayerMask;
+			return (1 << inObject2) & s_movingLayerMaskDefault;
 		case DEBRIES:
-			return (1 << inObject2) & s_debriesLayerMask;
+			return (1 << inObject2) & s_debriesLayerMaskDefault;
 		case SENSOR:
-			return (1 << inObject2) & s_sensorLayerMask;
+			return (1 << inObject2) & s_sensorLayerMaskDefault;
 		case BULLET:
-			return (1 << inObject2) & s_bulletLayerMask;
+			return (1 << inObject2) & s_bulletLayerMaskDefault;
 		case WEAPON:
-			return (1 << inObject2) & s_weaponLayerMask;
+			return (1 << inObject2) & s_weaponLayerMaskDefault;
 		default:
 			JPH_ASSERT(false);
 			return false;
 		}
 	}
 };
+
+class WP_PhysicsSystemObjectLayerPairFilter : public JPH::ObjectLayerPairFilter 
+{
+	WP_Physics::WP_PhysicsObjectLayer& m_objectLayer;
+public:
+	WP_PhysicsSystemObjectLayerPairFilter(WP_PhysicsSystem& m_parent);
+	virtual bool					ShouldCollide(JPH::ObjectLayer inObject1, JPH::ObjectLayer inObject2) const override
+	{
+		using namespace Layers;
+		assert((inObject1 < JPH_OBJECT_LAYER_BITS) && (inObject2 < JPH_OBJECT_LAYER_BITS));	//both are valid layers
+		if ((inObject1 > JPH_OBJECT_LAYER_BITS) || (inObject2 > JPH_OBJECT_LAYER_BITS)) { return false; }
+		
+		return m_objectLayer[inObject1][inObject2];
+	}
+};
+
+class WP_PhysicsSystemObjectVsBroadPhaseLayerFilterImpl : public JPH::ObjectVsBroadPhaseLayerFilter
+{
+public:
+	virtual bool				ShouldCollide(JPH::ObjectLayer inLayer1, JPH::BroadPhaseLayer inLayer2) const override
+	{
+		assert(inLayer1 < JPH_OBJECT_LAYER_BITS);
+		assert(inLayer2.GetValue() < BroadPhaseLayers::NUM_LAYERS);
+		if (inLayer1 >= JPH_OBJECT_LAYER_BITS || inLayer2.GetValue() >= BroadPhaseLayers::NUM_LAYERS)
+		{return false;}	//catch during release
+		using namespace Layers;
+		if(inLayer2 == BroadPhaseLayers::NON_MOVING)
+			return m_objectLayerFilter.getLayerIsMovingLayer(inLayer1) ;
+		else
+			return true;
+	}
+
+	WP_PhysicsSystemObjectVsBroadPhaseLayerFilterImpl(WP_Physics::WP_PhysicsObjectLayer& _ref)
+		: m_objectLayerFilter{_ref}
+	{/*Empty by design*/ }
+	WP_Physics::WP_PhysicsObjectLayer& m_objectLayerFilter;
+};
+using WP_OVBPLayerFilertImpl = WP_PhysicsSystemObjectVsBroadPhaseLayerFilterImpl;
 
 //quick return broad phase layers
 class WP_BPLayerInterfaceImpl final : public JPH::BroadPhaseLayerInterface
@@ -419,6 +519,10 @@ public:
 		m_ObjectToBroadPhase[Layers::NON_MOVING] = BroadPhaseLayers::NON_MOVING;
 		m_ObjectToBroadPhase[Layers::MOVING] = BroadPhaseLayers::MOVING;
 		m_ObjectToBroadPhase[Layers::DEBRIES] = BroadPhaseLayers::DEBRIES;
+		for (unsigned i{ Layers::DEBRIES + 1 }; i < JPH_OBJECT_LAYER_BITS; ++i) 
+		{	//default all other object layers to be matched as MOVING broadphase layer
+			m_ObjectToBroadPhase[i] = BroadPhaseLayers::MOVING;
+		}
 	}
 
 	virtual JPH::uint					GetNumBroadPhaseLayers() const override
@@ -428,7 +532,7 @@ public:
 
 	virtual JPH::BroadPhaseLayer			GetBroadPhaseLayer(JPH::ObjectLayer inLayer) const override
 	{
-		JPH_ASSERT(inLayer < Layers::NUM_LAYERS);
+		JPH_ASSERT(inLayer < JPH_OBJECT_LAYER_BITS);
 		return m_ObjectToBroadPhase[inLayer];
 	}
 
@@ -446,7 +550,7 @@ public:
 #endif // JPH_EXTERNAL_PROFILE || JPH_PROFILE_ENABLED
 
 private:
-	JPH::BroadPhaseLayer					m_ObjectToBroadPhase[Layers::NUM_LAYERS];
+	JPH::BroadPhaseLayer					m_ObjectToBroadPhase[JPH_OBJECT_LAYER_BITS];
 };
 
 //which ObjectLayers should work on which BP_Layer?
@@ -455,8 +559,8 @@ class WP_ObjectVsBroadPhaseLayerFilterImpl : public JPH::ObjectVsBroadPhaseLayer
 public:
 	virtual bool				ShouldCollide(JPH::ObjectLayer inLayer1, JPH::BroadPhaseLayer inLayer2) const override
 	{
-		assert(inLayer1<Layers::NUM_LAYERS);
-		assert(inLayer2.GetValue()<BroadPhaseLayers::NUM_LAYERS);
+		assert(inLayer1 < Layers::NUM_LAYERS);
+		assert(inLayer2.GetValue() < BroadPhaseLayers::NUM_LAYERS);
 		using namespace Layers;
 		switch (inLayer1)
 		{
@@ -518,6 +622,12 @@ public:
 	{
 
 	public:
+		WP_ContactListener()
+			: JPH::ContactListener{}
+		{
+			m_ContactAddedList.reserve(1024); m_ContactPersistList.reserve(1024); m_ContactRemovedList.reserve(1024);
+		}
+
 		// See: ContactListener
 		virtual JPH::ValidateResult	OnContactValidate(const JPH::Body& inBody1, const JPH::Body& inBody2,
 			JPH::RVec3Arg inBaseOffset, const JPH::CollideShapeResult& inCollisionResult) override;
@@ -543,7 +653,8 @@ public:
 		public:
 			WP_ContactPayloadDelayed(const WP_GameObjectID _gID1, const WP_GameObjectID _gID2)
 				: m_gameObject1{ _gID1 }, m_gameObject2{ _gID2 }
-			{/*Empty by Design*/}
+			{/*Empty by Design*/
+			}
 
 			const WP_GameObjectID m_gameObject1;
 			const WP_GameObjectID m_gameObject2;
@@ -556,7 +667,8 @@ public:
 				const JPH::ContactManifold& _cM, JPH::ContactSettings& _cS)
 				: m_gameObject1{ _gID1 }, m_gameObject2{ _gID2 },
 				m_contactManifold{ _cM }, m_contactSettings{ _cS }
-			{/*Empty by Design*/}
+			{/*Empty by Design*/
+			}
 
 			const WP_GameObjectID m_gameObject1;
 			const WP_GameObjectID m_gameObject2;
@@ -578,7 +690,7 @@ public:
 		std::vector<WP_ContactPayloadDelayed>							m_ContactAddedList;
 		std::vector<WP_ContactPayloadDelayed>							m_ContactPersistList;
 		std::vector<WP_ContactPayloadDelayed>							m_ContactRemovedList;
-};
+	};
 
 
 	//================================================================================
@@ -596,8 +708,13 @@ public:
 	void RemoveTestShapes();
 
 	inline JPH::BodyInterface& GetPhysicsBI() { return m_physics_system.GetBodyInterface(); }
-	inline JPH::BodyInterface const& GetPhysicsBI() const { return m_physics_system.GetBodyInterface(); }
-	inline JPH::NarrowPhaseQuery const& GetPhysicsNPQ() const { return m_physics_system.GetNarrowPhaseQuery(); }
+	inline JPH::BodyInterface const& GetPhysicsBI() const { return m_physics_system.GetBodyInterface(); }			//get physics body interface
+	inline JPH::NarrowPhaseQuery const& GetPhysicsNPQ() const { return m_physics_system.GetNarrowPhaseQuery(); }	//get narrow phase query interface
+	inline JPH::BroadPhaseQuery const& GetPhysicsBPQ() const { return m_physics_system.GetBroadPhaseQuery(); }		//get broad phase query interface
+	inline WP_Physics::WP_PhysicsObjectLayer& GetObjectLayerLogic() { return m_objectLayerLogic; }
+	inline bool GetIsRunning() { return m_isPhysicsRunning; }
+
+
 private:
 	WP_PhysicsSystem();
 	~WP_PhysicsSystem();
@@ -608,6 +725,8 @@ private:
 	//Hide all JPH stuff from users
 	bool										m_isPhysicsLocked = false;
 	bool										m_isPhysicsReloaded = false;
+	bool										m_isPhysicsRunning = false;
+
 	int											m_maxPhysicsSteps;
 	JPH::PhysicsSystem							m_physics_system;
 
@@ -621,8 +740,8 @@ private:
 
 #if 1
 	WP_BodyActivationListener					m_BodyActivationListener;						//call while collision active
-	WP_ObjectLayerPairFilter					m_ObjectLayerPairFilter;
-	WP_ObjectVsBroadPhaseLayerFilterImpl		m_ObjectVsBroadPhaseLayerFilterImpl;
+	WP_PhysicsSystemObjectLayerPairFilter		m_ObjectLayerPairFilter;
+	WP_OVBPLayerFilertImpl						m_ObjectVsBroadPhaseLayerFilterImpl;
 	WP_BPLayerInterfaceImpl						m_BPLayerInterfaceImpl;
 	WP_ContactListener							m_ContactListener;								//call contact object body id's callback function, call on contact
 #else
@@ -631,13 +750,15 @@ private:
 #endif
 
 	std::map<uint32_t, WP_GameObjectID>			m_bodyToID;
+
+	WP_Physics::WP_PhysicsObjectLayer			m_objectLayerLogic;
 	//JPH::StateRecorderImpl						m_defaultState;
 
 	using eventPair = std::pair<EventType, WP_EventCallback::idType>;
 	//std::array<eventPair, 2>					m_eventSubscribers;
 
 	//Test Vars
-	JPH::BodyID sphere_id ;
+	JPH::BodyID sphere_id;
 	JPH::Body* floor = nullptr;
 
 	//================================================================================
@@ -663,87 +784,93 @@ public:
 	bool GetIsPhysicsLocked() const;
 
 	//================================================================================
+	//						JPH::Body MoveKinematic function
+	//================================================================================
+	void				MoveKinematic(WP_GameObjectID _id, glm::vec3 _endPos, glm::quat _endRot,float _timeToReachDest);
+
+	//================================================================================
 	//					JPH::Body Property retrieval functions
 	//================================================================================
-	WP_PhysicsShape		GetBodyPhysicsShape				(WP_GameObjectID _id) const;
-	float				GetBodyFriction					(WP_GameObjectID _id) const;
-	float				GetBodyRestitution				(WP_GameObjectID _id) const;
-	float				GetBodyGravityFactor			(WP_GameObjectID _id) const;
+	WP_PhysicsShape		GetBodyPhysicsShape(WP_GameObjectID _id) const;
+	float				GetBodyFriction(WP_GameObjectID _id) const;
+	float				GetBodyRestitution(WP_GameObjectID _id) const;
+	float				GetBodyGravityFactor(WP_GameObjectID _id) const;
 
-	bool				GetBodyActive					(WP_GameObjectID _id) const;
-	JPH::EMotionQuality GetBodyMotionQuality			(WP_GameObjectID _id) const;
-	JPH::EMotionType	GetBodyMotionType				(WP_GameObjectID _id) const;
-	JPH::ObjectLayer	GetBodyObjectLayer				(WP_GameObjectID _id) const;
+	bool				GetBodyActive(WP_GameObjectID _id) const;
+	JPH::EMotionQuality GetBodyMotionQuality(WP_GameObjectID _id) const;
+	JPH::EMotionType	GetBodyMotionType(WP_GameObjectID _id) const;
+	JPH::ObjectLayer	GetBodyObjectLayer(WP_GameObjectID _id) const;
 
-	glm::vec3			GetBodyPosition					(WP_GameObjectID _id) const;
-	glm::vec3			GetBodyCenterMass				(WP_GameObjectID _id) const;
-	glm::vec4			GetBodyRotation					(WP_GameObjectID _id) const;
-	void				GetBodyPositionAndRotation		(WP_GameObjectID _id, glm::vec3& _outPos, glm::vec4& _outRot) const;
-	glm::mat4x4			GetBodyWorldTransform			(WP_GameObjectID _id) const;
-	glm::mat4x4			GetBodyInverseInertia			(WP_GameObjectID _id) const;
+	glm::vec3			GetBodyPosition(WP_GameObjectID _id) const;
+	glm::vec3			GetBodyCenterMass(WP_GameObjectID _id) const;
+	glm::vec4			GetBodyRotation(WP_GameObjectID _id) const;
+	glm::quat			GetBodyRotationQuat(WP_GameObjectID _id) const;
+	void				GetBodyPositionAndRotation(WP_GameObjectID _id, glm::vec3& _outPos, glm::vec4& _outRot) const;
+	glm::mat4x4			GetBodyWorldTransform(WP_GameObjectID _id) const;
+	glm::mat4x4			GetBodyInverseInertia(WP_GameObjectID _id) const;
 
-	glm::vec3			GetBodyLinearVelocity			(WP_GameObjectID _id) const;
-	glm::vec3			GetBodyPointVelocity			(WP_GameObjectID _id, glm::vec3 _point) const;
-	glm::vec3			GetBodyAngularVelocity			(WP_GameObjectID _id) const;
-	void				GetBodyLinearAndAngularVelocity	(WP_GameObjectID _id, glm::vec3& _outLinearVel, glm::vec3& _outAngularVel) const;
+	glm::vec3			GetBodyLinearVelocity(WP_GameObjectID _id) const;
+	glm::vec3			GetBodyPointVelocity(WP_GameObjectID _id, glm::vec3 _point) const;
+	glm::vec3			GetBodyAngularVelocity(WP_GameObjectID _id) const;
+	void				GetBodyLinearAndAngularVelocity(WP_GameObjectID _id, glm::vec3& _outLinearVel, glm::vec3& _outAngularVel) const;
 
 
 	//================================================================================
 	//					JPH::Body Property mutator functions
 	//================================================================================
 private:
-	void				SetBodyPhysicsShape				(WP_GameObjectID _id, WP_PhysicsShape _newShape, JPH::Shape& _newSettings , bool _updateMassProperties = true, bool _isActive = true);
-	void				SetBodyPhysicsShape				(WP_GameObjectID _id, WP_PhysicsShape _newShape, bool _updateMassProperties = true, bool _isActive = true);
+	void				SetBodyPhysicsShape(WP_GameObjectID _id, WP_PhysicsShape _newShape, JPH::Shape& _newSettings, bool _updateMassProperties = true, bool _isActive = true);
+	void				SetBodyPhysicsShape(WP_GameObjectID _id, WP_PhysicsShape _newShape, bool _updateMassProperties = true, bool _isActive = true);
 
 public:
 
-	void				SetBodyFriction					(WP_GameObjectID _id, float _newFriction = 1.0f);
-	void				SetBodyRestitution				(WP_GameObjectID _id, float _newCOR = 1.0f);
-	void				SetBodyGravityFactor			(WP_GameObjectID _id, float _newGravityFactor = 1.0f);
+	void				SetBodyFriction(WP_GameObjectID _id, float _newFriction = 1.0f);
+	void				SetBodyRestitution(WP_GameObjectID _id, float _newCOR = 1.0f);
+	void				SetBodyGravityFactor(WP_GameObjectID _id, float _newGravityFactor = 1.0f);
 
 	template <bool _isActive>
-	void				SetBodyActive					(WP_GameObjectID _id);
-	void				SetBodyMotionQuality			(WP_GameObjectID _id, JPH::EMotionQuality _newMotionQuality);
-	void				SetBodyMotionType				(WP_GameObjectID _id, JPH::EMotionType _newMotionType);
-	void				SetBodyObjectLayer				(WP_GameObjectID _id, JPH::ObjectLayer _newMotionLayer);
+	void				SetBodyActive(WP_GameObjectID _id);
+	void				SetBodyMotionQuality(WP_GameObjectID _id, JPH::EMotionQuality _newMotionQuality);
+	void				SetBodyMotionType(WP_GameObjectID _id, JPH::EMotionType _newMotionType);
+	void				SetBodyObjectLayer(WP_GameObjectID _id, JPH::ObjectLayer _newMotionLayer);
 
-	void				SetBodyPosition					(WP_GameObjectID _id, glm::vec3 const& _newPos);
-	void				SetBodyRotation					(WP_GameObjectID _id, glm::quat const& _newRot);
-	void				SetBodyRotation					(WP_GameObjectID _id, glm::vec3 const& _newRot);
+	void				SetBodyPosition(WP_GameObjectID _id, glm::vec3 const& _newPos);
+	void				SetBodyRotation(WP_GameObjectID _id, glm::quat const& _newRot);
+	void				SetBodyRotation(WP_GameObjectID _id, glm::vec3 const& _newRot);
 
-	void				SetBodyLinearVelocity			(WP_GameObjectID _id, glm::vec3 const& _newLinearVelocity);
-	void				SetBodyAngularVelocity			(WP_GameObjectID _id, glm::vec3 const& _newAngularVelocity);
+	void				SetBodyLinearVelocity(WP_GameObjectID _id, glm::vec3 const& _newLinearVelocity);
+	void				SetBodyAngularVelocity(WP_GameObjectID _id, glm::vec3 const& _newAngularVelocity);
 
 	//================================================================================
 	//					JPH::Body Property Add Force functions
 	//================================================================================
 
-	void				AddForceToBody					(WP_GameObjectID _id, glm::vec3 const& _force, bool _isActive = true);
-	void				AddForceToPoint					(WP_GameObjectID _id, glm::vec3 const& _force, glm::vec3 const& _point, bool _isActive = true);
-	void				AddTorqueToBody					(WP_GameObjectID _id, glm::vec3 const& _torque, bool _isActive = true);
-	void				AddForceAndTorqueToBody			(WP_GameObjectID _id, glm::vec3 const& _force, glm::vec3 const& _torque, bool _isActive = true);
+	void				AddForceToBody(WP_GameObjectID _id, glm::vec3 const& _force, bool _isActive = true);
+	void				AddForceToPoint(WP_GameObjectID _id, glm::vec3 const& _force, glm::vec3 const& _point, bool _isActive = true);
+	void				AddTorqueToBody(WP_GameObjectID _id, glm::vec3 const& _torque, bool _isActive = true);
+	void				AddForceAndTorqueToBody(WP_GameObjectID _id, glm::vec3 const& _force, glm::vec3 const& _torque, bool _isActive = true);
 
-	void				AddImpulseToBody				(WP_GameObjectID _id, glm::vec3 const& _impulse);
-	void				AddImpulseToPoint				(WP_GameObjectID _id, glm::vec3 const& _impulse, glm::vec3 const& _point);
-	void				AddAngularImpulseToBody			(WP_GameObjectID _id, glm::vec3 const& _angularImpulse);
+	void				AddImpulseToBody(WP_GameObjectID _id, glm::vec3 const& _impulse);
+	void				AddImpulseToPoint(WP_GameObjectID _id, glm::vec3 const& _impulse, glm::vec3 const& _point);
+	void				AddAngularImpulseToBody(WP_GameObjectID _id, glm::vec3 const& _angularImpulse);
 
 	// JPH has a function for buoyancy impulse, but wont be implemented unless needed.
 	//bool 	ApplyBuoyancyImpulse (const BodyID &inBodyID, RVec3Arg inSurfacePosition, Vec3Arg inSurfaceNormal, float inBuoyancy, float inLinearDrag, float inAngularDrag, Vec3Arg inFluidVelocity, Vec3Arg inGravity, float inDeltaTime)
 	//================================================================================
 	//						Character settings for ECS Component
 	//================================================================================
-	void				CharacterSetLinearVelocity		(WP_GameObjectID _id, glm::vec3 const& _vel);
-	void				CharacterAddVelocity			(WP_GameObjectID _id, glm::vec3 const& _addVel);
-	glm::vec3			CharacterGetLinearVelocity		(WP_GameObjectID _id) const;
+	void				CharacterSetLinearVelocity(WP_GameObjectID _id, glm::vec3 const& _vel);
+	void				CharacterAddVelocity(WP_GameObjectID _id, glm::vec3 const& _addVel);
+	glm::vec3			CharacterGetLinearVelocity(WP_GameObjectID _id) const;
 
-	void				CharacterAddImpulse				(WP_GameObjectID _id, glm::vec3 const& _addImp);
+	void				CharacterAddImpulse(WP_GameObjectID _id, glm::vec3 const& _addImp);
 
-	void				CharacterSetRotation			(WP_GameObjectID _id, glm::vec3 const& _rotInDegrees);
-	void				CharacterRotate					(WP_GameObjectID _id, glm::vec3 const& _addRotInDegrees);
-	void				CharacterRotate					(WP_GameObjectID _id, float _addAngleYaxis);
-	glm::vec3			CharacterGetRotattion			(WP_GameObjectID _id) const;
+	void				CharacterSetRotation(WP_GameObjectID _id, glm::vec3 const& _rotInDegrees);
+	void				CharacterRotate(WP_GameObjectID _id, glm::vec3 const& _addRotInDegrees);
+	void				CharacterRotate(WP_GameObjectID _id, float _addAngleYaxis);
+	glm::vec3			CharacterGetRotattion(WP_GameObjectID _id) const;
 
-	bool				CharacterGetIsGrounded			(WP_GameObjectID _id) const;
+	bool				CharacterGetIsGrounded(WP_GameObjectID _id) const;
 
 	//================================================================================
 	//						Raycast functions for ECS Component
@@ -754,16 +881,16 @@ public:
 	public:
 		enum CastBPLayer : JPH::BroadPhaseLayer::Type
 		{
-			ALL			= 0b0111,
-			NONE		= 0b1000,
-			NON_MOVING	= 0b0001,
-			MOVING		= 0b0010,
-			SENSOR		= 0b0100
+			ALL = 0b0111,
+			NONE = 0b1000,
+			NON_MOVING = 0b0001,
+			MOVING = 0b0010,
+			SENSOR = 0b0100
 		};
 
 		CastBPMask() = default;
-		CastBPMask(uint8_t _ref) :m_IgnoredIDsMask{(CastBPLayer)_ref} {/*Empty By Design*/}
-		CastBPMask(CastBPLayer _ref) :m_IgnoredIDsMask{_ref} {/*Empty By Design*/}
+		CastBPMask(uint8_t _ref) :m_IgnoredIDsMask{ (CastBPLayer)_ref } {/*Empty By Design*/ }
+		CastBPMask(CastBPLayer _ref) :m_IgnoredIDsMask{ _ref } {/*Empty By Design*/ }
 
 		virtual bool					ShouldCollide(JPH::BroadPhaseLayer _inLayer) const
 		{
@@ -776,24 +903,24 @@ public:
 	using			CastBPLayer = CastBPMask::CastBPLayer;
 
 	class			CastLayerMask final : public JPH::ObjectLayerFilter
-	{
+	{	//TODO: to be updated to match new objectLayer
 	public:
 		enum CastLayer : JPH::ObjectLayer
 		{
-			ALL			= 0b0011'1111,
-			NONE		= 0b0000'0000,
-			NON_MOVING	= 0b0000'0001,
-			MOVING		= 0b0000'0010,
-			SENSOR		= 0b0000'0100,
-			DEBRIES		= 0b0000'1000,
-			BULLET		= 0b0001'0000,
-			WEAPON		= 0b0010'0000
+			ALL = 0b0011'1111,
+			NONE = 0b0000'0000,
+			NON_MOVING = 0b0000'0001,
+			MOVING = 0b0000'0010,
+			SENSOR = 0b0000'0100,
+			DEBRIES = 0b0000'1000,
+			BULLET = 0b0001'0000,
+			WEAPON = 0b0010'0000
 		};
 		static constexpr CastLayer c_InvalidLayerMask = (CastLayer)(0b1100'0000);
 
 		CastLayerMask() = default;
-		CastLayerMask(uint16_t _mask) : m_IgnoredIDsMask{ (CastLayer)(_mask & ~c_InvalidLayerMask) } {/*Empty by Design*/}
-		CastLayerMask(CastLayer _mask) : m_IgnoredIDsMask{ (CastLayer)(_mask & ~c_InvalidLayerMask) } {/*Empty by Design*/}
+		CastLayerMask(uint16_t _mask) : m_IgnoredIDsMask{ (CastLayer)(_mask & ~c_InvalidLayerMask) } {/*Empty by Design*/ }
+		CastLayerMask(CastLayer _mask) : m_IgnoredIDsMask{ (CastLayer)(_mask & ~c_InvalidLayerMask) } {/*Empty by Design*/ }
 
 		virtual bool					ShouldCollide(JPH::ObjectLayer _inObject) const override
 		{
@@ -809,13 +936,13 @@ public:
 	using			CastLayer = CastLayerMask::CastLayer;
 
 	using			CastIDMask = std::set<WP_GameObjectID>;
-	using			CastIDMasktRef = std::set<WP_GameObjectID> &;
+	using			CastIDMasktRef = std::set<WP_GameObjectID>&;
 	using			CastIDMaskConstRef = std::set<WP_GameObjectID> const&;
 	class			CastIDFilter final : public JPH::BodyFilter
 	{
 	public:
 		CastIDFilter() = default;
-		CastIDFilter(CastIDMaskConstRef _ref) : m_IgnoredIDsMask{_ref} {/*Empty by Design*/ }
+		CastIDFilter(CastIDMaskConstRef _ref) : m_IgnoredIDsMask{ _ref } {/*Empty by Design*/ }
 
 		virtual bool			ShouldCollide(const JPH::BodyID& _inBodyID) const
 		{
@@ -843,26 +970,90 @@ public:
 	using			WP_HitFraction = float;
 	using			WP_RayResult = std::pair<WP_GameObjectID, WP_HitFraction>;
 	using			WP_RayResultCollector = std::vector<WP_RayResult>;
+	using			WP_SphereCastResultCollector = std::vector<WP_GameObjectID>;
+	using			WP_CubeCastResultCollector = std::vector<WP_GameObjectID>;
 
-	bool				CastRay							(glm::vec3 const& _origin,
-														glm::vec3 const& _dirVector,
-														WP_RayResult& _hit,					//out variable
-														CastBPLayer _BroadPhaseLayerMask = CastBPLayer::ALL,
-														CastLayer _ObjectLayerMask = CastLayer::ALL,
-														CastIDMask const& _GameObjectIDMask = CastIDMask()) const;
+	bool				CastRay(glm::vec3 const& _origin,
+		glm::vec3 const& _dirVector,
+		WP_RayResult& _hit,					//out variable
+		CastBPLayer _BroadPhaseLayerMask = CastBPLayer::ALL,
+		CastLayer _ObjectLayerMask = CastLayer::ALL,
+		CastIDMask const& _GameObjectIDMask = CastIDMask()) const;
 
-	bool				CastRay							(glm::vec3 const& _origin,
-														glm::vec3 const& _dirVector,
-														WP_RayResultCollector& _hits,		//out all hits variable
-														CastBPLayer _BroadPhaseLayerMask = CastBPLayer::ALL,
-														CastLayer _ObjectLayerMask = CastLayer::ALL,
-														CastIDMask const& _GameObjectIDMask = CastIDMask()) const;
+	bool				CastRay(glm::vec3 const& _origin,
+		glm::vec3 const& _dirVector,
+		WP_RayResultCollector& _hits,		//out all hits variable
+		CastBPLayer _BroadPhaseLayerMask = CastBPLayer::ALL,
+		CastLayer _ObjectLayerMask = CastLayer::ALL,
+		CastIDMask const& _GameObjectIDMask = CastIDMask()) const;
 
-	bool				CastRayAgainstObject			(WP_GameObjectID _objectToCheck,
-														glm::vec3 const& _origin,
-														glm::vec3 const& _dirVector) const;
+	bool				CastRayAgainstObject(WP_GameObjectID _objectToCheck,
+		glm::vec3 const& _origin,
+		glm::vec3 const& _dirVector) const;
+
+	struct WP_PhysicsShapeCastSetting {
+		WP_PhysicsShapeCastSetting(WP_PhysicsShape _shape, glm::vec3 _scale, glm::quat _rotation);
+		WP_PhysicsShape m_shape;	//store shape type
+		std::unique_ptr<JPH::ShapeSettings> m_shapeSettings;
+		glm::vec3 m_scale;
+		glm::quat m_rotation;
+	};
+
+	struct WP_CastShapeResult
+	{
+		WP_CastShapeResult(JPH::Vec3Arg&, JPH::Vec3Arg&, JPH::Vec3Arg&, float, WP_GameObjectID);
+		WP_CastShapeResult(WP_GameObjectID);
+		glm::vec3 m_collisionPoint1;
+		glm::vec3 m_collisionPoint2;
+		glm::vec3 m_pentrationNormal;
+		float m_pentrationDepth;
+		WP_GameObjectID m_collidedGID;
+	};
+
+	using			WP_ShapeCastResultCollector = std::vector<WP_CastShapeResult>;
+#if 1
+
+	//Singular shape casting
+
+	bool				CastSphere(float _radius,
+		glm::vec3 _center,
+		WP_SphereCastResultCollector& _results,
+		CastBPLayer _BroadPhaseLayerMask = CastBPLayer::ALL,
+		CastLayer _ObjectLayerMask = CastLayer::ALL) const;
+
+	bool				CastCube(glm::vec3 _center,
+		glm::quat _globalRotation,
+		glm::vec3 _globalScale,
+		WP_CubeCastResultCollector& _results,
+		CastBPLayer _BroadPhaseLayerMask = CastBPLayer::ALL,
+		CastLayer _ObjectLayerMask = CastLayer::ALL) const;
 
 
+	//multi shape for ray cast with volumes casting
+
+	bool				CastShape(WP_ShapeCastResultCollector& _hits,			//out variable
+		WP_PhysicsShapeCastSetting _shapeCastSettings,
+		glm::vec3 _origin,
+		glm::vec3 _dirVector,
+		CastBPLayer _BroadPhaseLayerMask = CastBPLayer::ALL,
+		CastLayer _ObjectLayerMask = CastLayer::ALL,
+		CastIDMask const& _GameObjectIDMask = CastIDMask()) const;
+
+	bool				CastShapeAgainstObject(WP_CastShapeResult& _hit,						//out variable
+		WP_GameObjectID _objectToCheck,
+		WP_PhysicsShapeCastSetting _shapeCastSettings,
+		glm::vec3 const& _origin,
+		glm::vec3 const& _dirVector) const;
+
+	//will cause a collision response
+	bool				CollideShape(WP_ShapeCastResultCollector& _hits,			//out variable
+		WP_PhysicsShapeCastSetting _shapeCastSettings,
+		glm::vec3 _origin,
+		glm::vec3 _dirVector,
+		CastBPLayer _BroadPhaseLayerMask = CastBPLayer::ALL,
+		CastLayer _ObjectLayerMask = CastLayer::ALL,
+		CastIDMask const& _GameObjectIDMask = CastIDMask()) const;
+#endif
 
 	//================================================================================
 	//						Create Body functions for ECS Component
@@ -870,20 +1061,20 @@ public:
 	// create a shape setting for
 #ifdef ILL_DO_THIS_PROPERLY_LATER_PLS	//deprecated
 	physicsIdType AddBody(const JPH::ShapeSettings* inShape, glm::vec3 inPosition, glm::vec4 inRotation,
-						  JPH::EMotionType inMotionType, JPH::ObjectLayer inObjectLayer);			//add body
+		JPH::EMotionType inMotionType, JPH::ObjectLayer inObjectLayer);			//add body
 
 	physicsIdType AddBody(WP_Physics3D& _comp);			//add body
 #endif
-	physicsIdType		AddBody							(WP_GameObjectID _id);	//add body
-	void				SuspendBody						(WP_GameObjectID _id);	//suspend body
-	void				ResumeBody						(WP_GameObjectID _id);	//re-add body
-	void				RemoveBody						(WP_GameObjectID _id);	//suspend and remove.
+	physicsIdType		AddBody(WP_GameObjectID _id);	//add body
+	void				SuspendBody(WP_GameObjectID _id);	//suspend body
+	void				ResumeBody(WP_GameObjectID _id);	//re-add body
+	void				RemoveBody(WP_GameObjectID _id);	//suspend and remove.
 
 	void AddPhysicsDelayedFunc()
 	{
 		//DEBUG CODE!!!
-		JPH::ObjectLayer x = 1;
-		WP_GameObjectID y = 2;
+		//JPH::ObjectLayer x = 1;
+		//WP_GameObjectID y = 2;
 		//DELAYED_PHYSICS_P1(y,SetBodyObjectLayer, JPH::ObjectLayer,  x);
 		//glm::vec3 up{0,9999999,0};
 		//DELAYED_PHYSICS_P3(y, AddForceToPoint, glm::vec3 const&, glm::vec3 const&, bool, up, up, true);
@@ -899,9 +1090,9 @@ constexpr CastLayerEnum		operator &					(CastLayerEnum, CastLayerEnum);
 constexpr CastLayerEnum		operator|					(CastLayerEnum, CastLayerEnum);
 constexpr CastLayerEnum		operator^					(CastLayerEnum, CastLayerEnum);
 constexpr CastLayerEnum		operator~					(CastLayerEnum);
-constexpr CastLayerEnum&	operator&=					(CastLayerEnum&, CastLayerEnum);
-constexpr CastLayerEnum&	operator|=					(CastLayerEnum&, CastLayerEnum);
-constexpr CastLayerEnum&	operator^=					(CastLayerEnum&, CastLayerEnum);
+constexpr CastLayerEnum& operator&=					(CastLayerEnum&, CastLayerEnum);
+constexpr CastLayerEnum& operator|=					(CastLayerEnum&, CastLayerEnum);
+constexpr CastLayerEnum& operator^=					(CastLayerEnum&, CastLayerEnum);
 
 using CastBPEnum = WP_PhysicsSystem::CastBPMask::CastBPLayer;
 
@@ -909,9 +1100,9 @@ constexpr CastBPEnum		operator &					(CastBPEnum, CastBPEnum);
 constexpr CastBPEnum		operator|					(CastBPEnum, CastBPEnum);
 constexpr CastBPEnum		operator^					(CastBPEnum, CastBPEnum);
 constexpr CastBPEnum		operator~					(CastBPEnum);
-constexpr CastBPEnum&		operator&=					(CastBPEnum&, CastBPEnum);
-constexpr CastBPEnum&		operator|=					(CastBPEnum&, CastBPEnum);
-constexpr CastBPEnum&		operator^=					(CastBPEnum&, CastBPEnum);
+constexpr CastBPEnum& operator&=					(CastBPEnum&, CastBPEnum);
+constexpr CastBPEnum& operator|=					(CastBPEnum&, CastBPEnum);
+constexpr CastBPEnum& operator^=					(CastBPEnum&, CastBPEnum);
 
 
 template <bool _isActive>
@@ -920,9 +1111,13 @@ void				WP_PhysicsSystem::SetBodyActive(WP_GameObjectID _id)
 	WP_Physics3D* pComp = WP_ComponentList<WP_Physics3D>::GetComponentList()->GetComponent(_id);
 	assert(pComp);
 	if constexpr (_isActive)
-	{GetPhysicsBI().ActivateBody(pComp->m_bID);}
+	{
+		GetPhysicsBI().ActivateBody(pComp->m_bID);
+	}
 	else
-	{GetPhysicsBI().DeactivateBody(pComp->m_bID);}
+	{
+		GetPhysicsBI().DeactivateBody(pComp->m_bID);
+	}
 }
 
 template <typename T>

@@ -133,10 +133,10 @@ struct DLL_API WP_Physics3D : WP_Component
 	WP_Physics3D& operator=(WP_Physics3D&& _ref) noexcept;
 	WP_Physics3D& operator=(WP_Physics3D const& _ref);
 
-	void Init() override;
-
 	void OnEnabled() override;
 	void OnDisabled() override;
+
+	bool IsEnabled() const noexcept;	//return m_isActive for derived class to check
 
 	void AddBody();
 	void SuspendBody();
@@ -145,7 +145,7 @@ struct DLL_API WP_Physics3D : WP_Component
 	void AddCharacter(JPH::ShapeSettings::ShapeResult const& _shape);
 	void RemoveCharacter();
 
-	//Remove Box collider dependency, set scale functions 
+	//Remove Box collider dependency, set scale functions
 	void SetScaleUniform(float _uniformScale);						//set a uniform scale for the shape
 	void SetScale(glm::vec3 const& _scale);							//set a scale for any shape
 	void SetScaleCube(glm::vec3 const& _xyzScale);					//set a scale for a cube scale
@@ -176,8 +176,10 @@ struct DLL_API WP_Physics3D : WP_Component
 	void SetIsNPC(bool);
 
 	DECLARE_GETTER_SETTER(GetIsTrigger, SetIsTrigger, bool, m_isTrigger);
+	DECLARE_GETTER_SETTER(GetKinematicVNonDynamic, SetKinematicVNonDynamic, bool, m_KinematicCollideNonDynamic);
 
 	bool GetIsValid() const;
+	DEFINE_GETTER_SETTER(GetIsMassOverride, SetIsMassOverride, bool, m_useMassOverride);
 
 	DECLARE_GETTER_SETTER(GetGravityScale, SetGravityScale,float, m_gravityScale);
 	GETTER_SETTER_FLOAT_PERCENT(GetFriction, SetFriction, m_friction);
@@ -215,12 +217,14 @@ struct DLL_API WP_Physics3D : WP_Component
 	void CharacterRotate(float);
 	glm::vec3 CharacterGetRotattion() const;
 
-	bool							m_isActive				{false};							//whether the body starts as active in the physics simulation, statics are always not active
-	bool							m_isPureStatic			{false};							//if pure static, m_motionType is ignored. body will never move. ignored if body is npc.
-	bool							m_isTrigger				{false};							//set the body to a trigger. dynamic is not allowed
-	bool							m_useTransformScale		{true};								//if true, use the scale in transform3D to set shape size
-	bool							m_isNPC					{false};							//If this component is on an npc
-	bool							m_isInPhysicsSystem		{false};							//If this component has been added to physics system
+	bool							m_isEnabled						{false};					//if component was already enabled and added to physics system
+	bool							m_isActive						{false};					//whether the body starts as active in the physics simulation, statics are always not active
+	bool							m_isPureStatic					{false};					//if pure static, m_motionType is ignored. body will never move. ignored if body is npc.
+	bool							m_isTrigger						{false};					//set the body to a trigger. dynamic is not allowed
+	bool							m_isNPC							{false};					//If this component is on an npc
+	bool							m_isInPhysicsSystem				{false};					//If this component has been added to physics system
+	bool							m_KinematicCollideNonDynamic	{false};					//if true,this kinematic body will collide with other kinematic and static bodies
+	bool							m_useMassOverride				{false};					//should the physics body recalculate mass based on collider volume.
 	JPH::EMotionType				m_motionType			{JPH::EMotionType::Static};			//motion type of object
 	WP_PhysicsShape					m_shapeType				{WP_PhysicsShape::CUBE};			//enum to represent shape
 	JPH::EAllowedDOFs				m_lockedAxis			{JPH::EAllowedDOFs::All};			//store which axis of the body is locked. ignored if physics body is character
@@ -237,7 +241,7 @@ struct DLL_API WP_Physics3D : WP_Component
 	float							m_maxSlopeAngleRadians	{JPH::DegreesToRadians(50.0f)};		//maximum slope the body can climb, not used if phsyics body is not a character
 	float							m_maxSeperationDistance	{1.0f};								//maximum distance the character can be floating off the slope.
 
-	glm::vec3						m_shapeScale			{ 0.5f, 0.5f, 0.5f };				//scale of the shape 
+	glm::vec3						m_shapeScale			{ 0.5f, 0.5f, 0.5f };				//scale of the shape
 
 	std::unique_ptr<JPH::Character>	m_charPtr				{nullptr};							//store pointer to character.
 
@@ -319,4 +323,4 @@ T GetRadianFromDegreesVector(T _vec)
 }
 
 //substitute functions, remove for final product
-JPH::ObjectLayer GetObjectLayer(JPH::EMotionType _motionType);	//Get the right layer for a motion type
+JPH::ObjectLayer GetObjectLayerFromMotionType(JPH::EMotionType _motionType);	//Get the right layer for a motion type

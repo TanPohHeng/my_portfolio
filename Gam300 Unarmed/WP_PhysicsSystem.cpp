@@ -26,12 +26,20 @@ assert(pComp);																						\
 #define WP_PHYSICS_DEBUG_IGNORE_JPH_ASSERT	1
 #endif
 
+#ifndef WP_PHYSICS_DEBUG_NO_PRINT_JPH_ASSERT
+#define WP_PHYSICS_DEBUG_NO_PRINT_JPH_ASSERT	1
+#endif
+
 #ifndef USE_TEST_SHAPES
-#define USE_TEST_SHAPES 1
+#define USE_TEST_SHAPES 0
 #endif
 
 #ifndef JPH_MULTI_THREAD
 #define JPH_MULTI_THREAD 0
+#endif
+
+#ifndef PHYSICS_CONTACT_LISTENER_CALLBACK_LIMIT
+#define PHYSICS_CONTACT_LISTENER_CALLBACK_LIMIT 1024
 #endif
 
 #ifndef MAX_PHYSICS_STEPS	//use this for modulo operations.
@@ -131,7 +139,10 @@ void TraceImpl(const char* inFMT, ...)
 bool AssertFailedImpl(const char* inExpression, const char* inMessage, const char* inFile, JPH::uint inLine)
 {
 	// Print to the TTY
+#if !WP_PHYSICS_DEBUG_NO_PRINT_JPH_ASSERT
 	cout << inFile << ":" << inLine << ": (" << inExpression << ") " << (inMessage != nullptr ? inMessage : "") << endl;
+#endif
+
 #if !WP_PHYSICS_DEBUG_IGNORE_JPH_ASSERT
 	// Breakpoint
 	return true;
@@ -267,6 +278,7 @@ public:
 //quick conversion between jolt and glm
 namespace WP_Physics
 {
+
 	JPH::Vec4 operator+(JPH::Vec4 const& _jphVec, glm::vec3 const& _glmVec)
 	{
 		return _jphVec + ToJoltVec4(_glmVec);
@@ -407,6 +419,32 @@ namespace WP_Physics
 		//return _quat.Inversed();	//temporaru, until jph inverse function issue is identified. TODO
 	}
 
+	/*!***********************************************************************
+	 \brief
+		Convert a JPH Quaternion to a vec3 of rotation in degrees
+	 \param [in] _quat
+		JPH quaternion to be converted
+	 \return
+		rotation of parameter in vec3
+	*************************************************************************/
+	glm::vec3 ToEulerAnglesDegrees(JPH::Quat const& _quat)
+	{
+		return GetDegreesFromRadianVector(ToGLMVec3(_quat.GetEulerAngles()));
+	}
+
+	/*!***********************************************************************
+	 \brief
+		Convert a GLM Quaternion to a vec3 of rotation in degrees
+	 \param [in] _quat
+		GLM quaternion to be converted
+	 \return
+		rotation of parameter in vec3
+	*************************************************************************/
+	glm::vec3 ToEulerAnglesDegrees(glm::quat const& _quat)
+	{
+		return GetDegreesFromRadianVector(glm::eulerAngles(_quat));
+	}
+
 	WP_ContactManifold::WP_ContactManifold(JPH::ContactManifold const& _manifold)
 		: m_penetrationDepth{ _manifold.mPenetrationDepth },
 		m_manifold{ _manifold },
@@ -460,6 +498,123 @@ namespace WP_Physics
 		m_contactSettings.mRelativeLinearSurfaceVelocity = ToJoltVec3(m_relativeLinearSurfaceVelocity);
 		m_contactSettings.mRelativeAngularSurfaceVelocity = ToJoltVec3(m_relativeAngularSurfaceVelocity);
 	}
+	
+	WP_PhysicsObjectLayer::WP_PhysicsObjectLayerHelper::WP_PhysicsLayerRelation::WP_PhysicsLayerRelation
+	(unsigned _pos, WP_PhysicsObjectLayerHelper& _origin)
+		: m_pos{ _pos }, m_parent{_origin}
+	{/*Empty by Design*/}
+
+	WP_PhysicsObjectLayer::WP_PhysicsObjectLayerHelper::WP_PhysicsLayerRelation::operator bool()
+	{ return m_parent.m_parent.m_objectLayerCollisionRelation[m_pos]; }
+
+	WP_PhysicsObjectLayer::WP_PhysicsObjectLayerHelper::WP_PhysicsLayerRelation&
+		WP_PhysicsObjectLayer::WP_PhysicsObjectLayerHelper::WP_PhysicsLayerRelation::operator=(bool _newVal)
+	{
+#if PHYSICS_LAYER_RELATIONS_USE_BITSET
+		m_parent.m_parent.m_objectLayerCollisionRelation.set(m_pos, _newVal);
+#else
+		m_parent.m_parent.m_objectLayerCollisionRelation[m_pos] = _newVal;
+#endif
+		return *this;
+	}
+
+	WP_PhysicsObjectLayer::WP_PhysicsObjectLayerHelper::WP_PhysicsObjectLayerHelper(unsigned _index1, WP_PhysicsObjectLayer& _parent)
+		: m_index1{ _index1 }, m_parent{_parent}
+	{/*Empty By Design*/ }
+
+	WP_PhysicsObjectLayer::WP_PhysicsObjectLayerHelper::WP_PhysicsLayerRelation 
+		WP_PhysicsObjectLayer::WP_PhysicsObjectLayerHelper::operator[](unsigned _index2)
+	{
+		unsigned max{std::max(_index2,m_index1)},	//max of both index
+				min{ std::min(_index2,m_index1) };	//min of both index
+
+		unsigned index = (max * (max + 1) / 2) + min;	//find sum of numbers up to max index
+
+		return WP_PhysicsLayerRelation(index, *this);	//return a proxy class to set and get bits at the correct position to the 1D array equivlent
+	}
+
+	WP_PhysicsObjectLayer::WP_PhysicsObjectLayer()
+	{
+		//set default layer interactions
+		setLayerReaction(Layers::NON_MOVING,Layers::s_nonMovingLayerMaskDefault, false);	//cant hit statics
+		setLayerReaction(Layers::MOVING,Layers::s_movingLayerMaskDefault);
+		setLayerReaction(Layers::SENSOR,Layers::s_sensorLayerMaskDefault);
+		setLayerReaction(Layers::DEBRIES,Layers::s_debriesLayerMaskDefault);
+		setLayerReaction(Layers::BULLET,Layers::s_bulletLayerMaskDefault);
+		setLayerReaction(Layers::WEAPON,Layers::s_weaponLayerMaskDefault);
+	}
+
+	WP_PhysicsObjectLayer::WP_PhysicsObjectLayerHelper
+		WP_PhysicsObjectLayer::operator[](unsigned _index2)
+	{
+		return WP_PhysicsObjectLayerHelper(_index2,*this);
+	}
+
+	void WP_PhysicsObjectLayer::setLayerReaction(JPH::ObjectLayer _layer, physicsCharLayerArr const& _layerReaction,bool _broadphaseLayerIsMoving)
+	{
+		auto&& layerReaction = (this->operator[](_layer));	//layer to be set
+		for (unsigned i{} ; i < JPH_OBJECT_LAYER_BITS;++i)
+		{	//set each of this physics layer interaction with other layers to new reaction
+			layerReaction[i] = _layerReaction[i];
+		}
+		m_objectLayerBroadphaseLayer.set(static_cast<unsigned>(_layer), _broadphaseLayerIsMoving);
+	}
+
+	void WP_PhysicsObjectLayer::setLayerReaction(JPH::ObjectLayer _layer, JPH::ObjectLayer const& _layerReactionMask, bool _broadphaseLayerIsMoving)
+	{
+		auto&& layerReaction = (this->operator[](_layer));	//layer to be set
+		for (unsigned i{}; i < JPH_OBJECT_LAYER_BITS; ++i)
+		{	//set each of this physics layer interaction with other layers to new reaction
+			layerReaction[i] = _layerReactionMask & (1 << i);
+		}
+		m_objectLayerBroadphaseLayer.set(static_cast<unsigned>(_layer), _broadphaseLayerIsMoving);
+	}
+
+	bool WP_PhysicsObjectLayer::getLayerIsMovingLayer(JPH::ObjectLayer _layer)
+	{
+		if (_layer >= JPH_OBJECT_LAYER_BITS)
+			return false;
+		return m_objectLayerBroadphaseLayer.test(static_cast<unsigned>(_layer));
+	}
+
+	std::ostream& operator<<(std::ostream& _os, WP_PhysicsObjectLayer& _layerLogic)
+	{
+		_os << "==================================================" << std::endl;
+		_os << "   ";		//gap for index
+		for (int i{ 0 }; i < JPH_OBJECT_LAYER_BITS; ++i)
+		{	//print header
+			_os << "[" << static_cast<char>(i + 'A') << "]";
+		}
+		_os << std::endl;	//newline
+
+		for (int i{0}; i < JPH_OBJECT_LAYER_BITS ;++i)
+		{
+			_os << "[" << static_cast<char>(i + 'A') << "]";	//index
+			for (int j{ 0 }; j < JPH_OBJECT_LAYER_BITS; ++j) 
+			{
+				_os << "[" << (_layerLogic[i][j] ? "*" : " ") << "]";
+			}
+			_os << std::endl;
+		}
+
+		_os << "==================================================" << std::endl;
+
+		_os << "If Layer Collides with moving broadphase layers:" << std::endl;
+		for (int i{ 0 }; i < JPH_OBJECT_LAYER_BITS; ++i)
+		{	//print header
+			_os << "[" << static_cast<char>(i + 'A') << "]";
+		}
+		_os << std::endl;
+		for (int i{ 0 }; i < JPH_OBJECT_LAYER_BITS; ++i)
+		{	//print if layer should collide with static layer
+			_os << "[" << (_layerLogic.m_objectLayerBroadphaseLayer[i] ? "*" : " ") << "]";
+		}
+		_os << std::endl;
+		_os << "==================================================" << std::endl;
+
+		return _os;
+	}
+
 }
 
 namespace {
@@ -481,11 +636,9 @@ namespace {
 
 WP_PhysicsSystem::WP_PhysicsSystem()
 	:WP_EngineSystem{ WP_EngineSystem::s_kSystemAllExceptOnPauseStillUpdate, "WP_PhysicsSystem" }
+	, m_ObjectLayerPairFilter{*this}
+	, m_ObjectVsBroadPhaseLayerFilterImpl{m_objectLayerLogic}
 {
-	m_ContactListener.m_ContactAddedList.reserve(1024);
-	m_ContactListener.m_ContactPersistList.reserve(1024);
-	m_ContactListener.m_ContactRemovedList.reserve(1024);
-
 
 	// Register allocation hook. In this example we'll just let Jolt use malloc / free but you can override these if you want (see Memory.h).
 	// This needs to be done before any other Jolt function is called.
@@ -505,11 +658,11 @@ WP_PhysicsSystem::WP_PhysicsSystem()
 	// If you implement your own default material (PhysicsMaterial::sDefault) make sure to initialize it before this function or else this function will create one for you.
 	JPH::RegisterTypes();
 
-	temp_allocator = std::make_unique<JPH::TempAllocatorImpl>(10 * 1024 * 1024);
+	temp_allocator = std::make_unique<JPH::TempAllocatorImpl>(100 * 1024 * 1024);
 
 #if JPH_MULTI_THREAD
 	job_system = std::make_unique<JPH::JobSystemThreadPool>(
-		JPH::cMaxPhysicsJobs, 
+		JPH::cMaxPhysicsJobs,
 		JPH::cMaxPhysicsBarriers,
 		(int)(thread::hardware_concurrency()) - 1);
 #else
@@ -618,6 +771,9 @@ void WP_PhysicsSystem::RemoveTestShapes()
 
 void WP_PhysicsSystem::OnEngineRun()
 {
+
+	//remove contact event
+	m_ContactListener.ClearContacts();
 	//m_physics_system.RestoreState(m_defaultState);
 #if USE_TEST_SHAPES
 	TestShapes();
@@ -634,6 +790,9 @@ void WP_PhysicsSystem::OnEngineRun()
 
 void WP_PhysicsSystem::OnEngineStop()
 {
+	//remove contact event
+	m_ContactListener.ClearContacts();
+	m_isPhysicsRunning = false;
 	//for ALL components regardless of usage state
 	auto& phyCompVec = WP_ComponentList<WP_Physics3D>::GetComponentList()->GetComponentVector();
 	for (auto t : phyCompVec)
@@ -717,15 +876,15 @@ void WP_PhysicsSystem::OnUpdate()
 		const int cCollisionSteps = static_cast<int>(std::ceilf(cDeltaTime / (1.0f / 60.0f)));
 		int collisionStepsThisUpdate{cCollisionSteps};
 
-		//if collision steps exceed the max number of rollback frames, 
+		//if collision steps exceed the max number of rollback frames,
 		if (cCollisionSteps > (MAX_PHYSICS_UPDATES_PER_FRAME * m_maxPhysicsSteps))
 		{	//rollback all frames above max collision steps into next frame
 			s_rollbackFrames += (cCollisionSteps - MAX_PHYSICS_UPDATES_PER_FRAME * m_maxPhysicsSteps);
 			collisionStepsThisUpdate = MAX_PHYSICS_UPDATES_PER_FRAME * m_maxPhysicsSteps;
 		}
-		//if not max number of collision steps and there are some rollback frames, 
+		//if not max number of collision steps and there are some rollback frames,
 		if (s_rollbackFrames > 0 && cCollisionSteps < (MAX_PHYSICS_UPDATES_PER_FRAME * m_maxPhysicsSteps))
-		{	//do some rollback frames 
+		{	//do some rollback frames
 			int oldRollbackFrames = s_rollbackFrames;	//save old number of rollback frames
 			//make rollback frames the remainder after taking enough frames to make step the max amount of updates this frame
 			s_rollbackFrames = (cCollisionSteps + s_rollbackFrames) % MAX_PHYSICS_STEPS;
@@ -736,7 +895,12 @@ void WP_PhysicsSystem::OnUpdate()
 		//auto& phyCompVec = WP_ComponentList<WP_Physics3D>::GetComponentList()->GetComponentVector();
 		auto&& phyCompVec = WP_ComponentSystem::WP_ComponentSystemIterator<WP_Physics3D>();
 		for (WP_Physics3D& t : phyCompVec)
-		{	//Trans -> Physics
+		{
+			//this should not be required as system iterator should have caused all non-active components to not show up,
+			//however as that is not the case now, this check is set to prevent werid stuff from happening
+			if (!t.IsEnabled())
+				continue;
+			//Trans -> Physics
 			//TO_TEST: Point of failure, rotation and position offsets
 			using namespace WP_Physics;
 			auto transComp = WP_ComponentList<WP_Transform3D>::GetComponentList()->GetComponent(t.GetGameObjectID());
@@ -745,16 +909,16 @@ void WP_PhysicsSystem::OnUpdate()
 			if (t.m_isNPC && t.m_charPtr)
 			{
 				t.m_charPtr->SetPositionAndRotation(
-					ToJoltVec3(transComp->m_position + WP_Physics::ToGLMVec3(t.m_posOffset)),
-					ToJoltQuat(glm::normalize(transComp->m_angle)) * t.m_rotOffset,
+					ToJoltVec3(transComp->m_globalPosition + WP_Physics::ToGLMVec3(t.m_posOffset)),
+					ToJoltQuat(transComp->GetGlobalAngleQuat()) * t.m_rotOffset,
 					WP_ACTIVATION_IS_ACTIVE(GetPhysicsBI().IsActive(t.m_bID)));
 			}
 			else
 			{
 				GetPhysicsBI().SetPositionAndRotationWhenChanged(
 					t.m_bID ,
-					ToJoltVec3(transComp->m_position + WP_Physics::ToGLMVec3(t.m_posOffset)),
-					ToJoltQuat(glm::normalize(transComp->m_angle)) * t.m_rotOffset,
+					ToJoltVec3(transComp->m_globalPosition + WP_Physics::ToGLMVec3(t.m_posOffset)),
+					ToJoltQuat(transComp->GetGlobalAngleQuat()) * t.m_rotOffset,
 					WP_ACTIVATION_IS_ACTIVE(GetPhysicsBI().IsActive(t.m_bID)));
 			}
 
@@ -801,7 +965,7 @@ void WP_PhysicsSystem::OnUpdate()
 			//cout << "ID [" << (t.m_bID.GetIndex()) << "]Step " << step << ": Position = (" << position.GetX() << ", " << position.GetY() << ", " << position.GetZ() << "), Velocity = (" << velocity.GetX() << ", " << velocity.GetY() << ", " << velocity.GetZ() << ")" << endl;
 		}
 		m_isPhysicsLocked = true;	//locked physics, all calls to setting functions are delayed
-		
+
 		while (cCollisionSteps && collisionStepsThisUpdate != 0)	//MAX_PHYSICS_UPDATES_PER_FRAME number of physics update loops
 		{
 			//find number of steps this update. must be less than hardware concurrency -1.
@@ -812,20 +976,60 @@ void WP_PhysicsSystem::OnUpdate()
 			//remove these steps from the number of steps we need this frame.
 			collisionStepsThisUpdate -= steps;
 		// Step the world
-		if (steps)	//if no collisions this frame, skip update
+		if (steps && thisUpdateDT > 0.0f)	//if no collisions this frame, skip update
 			m_physics_system.Update(thisUpdateDT, steps, &*temp_allocator, &*job_system);
 		}
 
-		
-		
-		m_isPhysicsLocked = false;	//unlocked physics
-		//run contact callback
-		m_ContactListener.CallbackAllContacts();
-		//remove contact event
-		m_ContactListener.ClearContacts();
 
+
+		m_isPhysicsLocked = false;	//unlocked physics
+
+#ifndef UPDATE_PHYSICS_CHILD_FIRST
+		//create the lambda to update physics values into transform
+		auto updateTransform = [&](WP_GameObjectID _id)
+			{
+				//grab a physics component linked to this game object ID
+				WP_Physics3D* pComp = WP_ComponentList<WP_Physics3D>::GetComponentList()->GetComponent(_id);
+
+				//if no physics component or component is not enabled
+				if (!pComp || (!pComp->IsEnabled()))
+					return;
+
+				//grab an instance of physics System
+				auto phySystem = WP_PhysicsSystem::GetInstance();
+
+				//Physics -> Trans
+				auto transComp = WP_ComponentList<WP_Transform3D>::GetComponentList()->GetComponent(pComp->GetGameObjectID());
+				//TO_TEST: Point of failure, rotation and position offsets
+				using namespace WP_Physics;
+				//Update with Non direct access to transform member variables. ideally through a function.
+				//Update Position and Rotation of transform based on physics calculations
+				transComp->SetGlobalPosition(ToGLMVec3(phySystem->GetPhysicsBI().GetPosition(pComp->m_bID)) - ToGLMVec3((pComp->m_posOffset)));	//to be confirmed.
+				transComp->SetGlobalAngleQuat(
+					ToGLMQuat(phySystem->GetPhysicsBI().GetRotation(pComp->m_bID)) * glm::conjugate(ToGLMQuat(pComp->m_rotOffset))
+				);		//to be confirmed.
+
+				if (pComp->m_isNPC && pComp->m_charPtr)
+				{	//update post simulation for characters
+					pComp->m_charPtr->PostSimulation(pComp->m_maxSeperationDistance);
+				}
+				/*if (pComp->GetMotionType() == JPH::EMotionType::Kinematic) 
+				{
+					GetPhysicsBI().MoveKinematic(pComp->m_bID,JPH::Vec3Arg(0,-1, 0),JPH::Quat::sIdentity(), 1.f);
+				}*/
+			};
+
+		//run the lambda transformation function on all entities.
+		phyCompVec.TrasformPostOrder(ROOT_NODE,updateTransform);
+#else
 		for (auto& t : phyCompVec)
-		{//Physics -> Trans
+		{	//TODO**: Update from child to parent
+			//this should not be required as system iterator should have caused all non-active components to not show up,
+			//however as that is not the case now, this check is set to prevent werid stuff from happening
+			if (!t.IsEnabled())
+				continue;
+
+		//Physics -> Trans
 		// VVV this optimization is to be implemented TODO:
 		 //if (GetPhysicsBI().GetMotionType(t.m_bID) == JPH::EMotionType::Static) { continue; }	//if static object, skip updating the transforms cus no movement
 			//otherwise, update transform
@@ -833,17 +1037,54 @@ void WP_PhysicsSystem::OnUpdate()
 //TO_TEST: Point of failure, rotation and position offsets
 			using namespace WP_Physics;
 			//Update with Non direct access to transform member variables. ideally through a function.
-			transComp->m_position = ToGLMVec3(GetPhysicsBI().GetPosition(t.m_bID)) - ToGLMVec3((t.m_posOffset));	//to be confirmed.
-			transComp->m_angle = ToGLMQuat(GetPhysicsBI().GetRotation(t.m_bID)) * inverse(ToGLMQuat(t.m_rotOffset));		//to be confirmed.
-
+			transComp->SetGlobalPosition(ToGLMVec3(GetPhysicsBI().GetPosition(t.m_bID)) - ToGLMVec3((t.m_posOffset)));	//to be confirmed.
+			transComp->SetGlobalAngleQuat(
+							ToGLMQuat(GetPhysicsBI().GetRotation(t.m_bID)) * glm::conjugate(ToGLMQuat(t.m_rotOffset))
+			);		//to be confirmed.
 			if (t.m_isNPC && t.m_charPtr)
 			{
 				t.m_charPtr->PostSimulation(t.m_maxSeperationDistance);
 			}
 		}
+#endif
+
+		//run contact callback
+		m_ContactListener.CallbackAllContacts();
+		//remove contact event
+		m_ContactListener.ClearContacts();
+
 	}
 }
 
+
+
+/*!***********************************************************************
+\brief
+	Move a kinematic object in a way that interacts with the physics
+	simulation. Moves kinematic object via velocity. will continue
+	moving after reaching _endPos after _timeToReachDest with constant
+	velocity.
+\param [in] _id
+	ID of the physics object to be moved. if gameobject of _id does not
+	have a physics body, or the physics body is not kinematic, this function
+	does nothing
+\param [in] _endPos
+	ending position of the physics body after _timeToReachDest seconds
+\param [in] _endRot
+	ending rotation of the physics body after _timeToReachDest seconds
+\param [in] _timeToReachDest
+	number of seconds it takes to complete this transformation
+*************************************************************************/
+void WP_PhysicsSystem::MoveKinematic(WP_GameObjectID _id,
+	glm::vec3 _endPos, glm::quat _endRot, float _timeToReachDest)
+{
+	OBTAIN_PHYSIC_COMPONENT(_id)
+		if (pComp->GetMotionType() != JPH::EMotionType::Kinematic) { return; }
+	GetPhysicsBI().MoveKinematic(pComp->m_bID,
+		WP_Physics::ToJoltVec3(_endPos),
+		WP_Physics::ToJoltQuat(_endRot),
+		_timeToReachDest);
+}
 
 //================================================================================
 //					JPH::Body Property retrieval functions
@@ -930,6 +1171,12 @@ glm::vec4			WP_PhysicsSystem::GetBodyRotation(WP_GameObjectID _id) const
 {
 	OBTAIN_CONST_PHYSIC_COMPONENT(_id)
 		return WP_Physics::ToGLMVec4(GetPhysicsBI().GetRotation(pComp->m_bID));
+}
+
+glm::quat			WP_PhysicsSystem::GetBodyRotationQuat(WP_GameObjectID _id) const
+{
+	OBTAIN_CONST_PHYSIC_COMPONENT(_id)
+		return WP_Physics::ToGLMQuat(GetPhysicsBI().GetRotation(pComp->m_bID));
 }
 
 void				WP_PhysicsSystem::GetBodyPositionAndRotation(WP_GameObjectID _id, glm::vec3& _outPos, glm::vec4& _outRot) const
@@ -1409,6 +1656,287 @@ bool WP_PhysicsSystem::CastRayAgainstObject(
 */
 
 
+
+//================================================================================
+//						Ray Cast Functions for Physics
+//================================================================================
+
+//supporting classes functions
+
+WP_PhysicsSystem::WP_PhysicsShapeCastSetting::WP_PhysicsShapeCastSetting
+(WP_PhysicsShape _shape, glm::vec3 _scale, glm::quat _rotation)
+	: m_shape{ _shape }, m_shapeSettings{ nullptr }, m_scale{ _scale }, m_rotation{ _rotation }
+{/*Empty By Design*/}
+
+WP_PhysicsSystem::WP_CastShapeResult::WP_CastShapeResult(
+	JPH::Vec3Arg& _collisionPt1,
+	JPH::Vec3Arg& _collisionPt2,
+	JPH::Vec3Arg& _collisionNormal,
+	float _collisionDepth,
+	WP_GameObjectID _gID):
+	m_collisionPoint1	{ WP_Physics::ToGLMVec3(_collisionPt1) },
+	m_collisionPoint2	{ WP_Physics::ToGLMVec3(_collisionPt2) },
+	m_pentrationNormal	{ glm::normalize(WP_Physics::ToGLMVec3(_collisionNormal)) },
+	m_pentrationDepth	{ _collisionDepth },
+	m_collidedGID		{_gID}
+{/*Empty by Design*/ }
+
+WP_PhysicsSystem::WP_CastShapeResult::WP_CastShapeResult(WP_GameObjectID _gID)
+	:m_collisionPoint1{ glm::vec3(0,0,0) },
+	m_collisionPoint2{ glm::vec3(0,0,0) },
+	m_pentrationNormal{ glm::vec3(0,0,0) },
+	m_pentrationDepth{ 0 },
+	m_collidedGID{ _gID }
+{/*Empty by Design*/}
+
+//Casting functions
+
+bool WP_PhysicsSystem::CastSphere(
+	float _radius,
+	glm::vec3 _center,
+	WP_SphereCastResultCollector& _hits,
+	CastBPLayer _BroadPhaseLayerMask,
+	CastLayer _ObjectLayerMask) const
+{
+	JPH::AllHitCollisionCollector<JPH::CollideShapeBodyCollector> results;	//store results
+
+	GetPhysicsBPQ().CollideSphere(
+		WP_Physics::ToJoltVec3(_center),
+		_radius,
+		results,
+		WP_PhysicsSystem::CastBPMask(_BroadPhaseLayerMask),
+		WP_PhysicsSystem::CastLayerMask(_ObjectLayerMask));
+
+	for (auto& result : results.mHits)
+	{	//push results to return by reference vector
+		_hits.push_back(m_bodyToID.find(result.GetIndex())->second);
+	}
+
+	return results.mHits.size();
+}
+
+bool WP_PhysicsSystem::CastCube(
+	glm::vec3 _center,
+	glm::quat _globalRotation,
+	glm::vec3 _globalScale,
+	WP_CubeCastResultCollector& _hits,
+	CastBPLayer _BroadPhaseLayerMask,
+	CastLayer _ObjectLayerMask) const
+{
+	JPH::AllHitCollisionCollector<JPH::CollideShapeBodyCollector> results;
+
+	JPH::Mat44 transform =
+		WP_Physics::ToJoltMat44(											//convert transformation to mat4x4 in jolt
+			glm::translate(glm::mat4(1.0f), _center) * glm::mat4_cast(_globalRotation)	// T, R
+		);
+
+	GetPhysicsBPQ().CollideOrientedBox(
+		JPH::OrientedBox(transform, WP_Physics::ToJoltVec3(_globalScale * 0.5f)),
+		results,
+		WP_PhysicsSystem::CastBPMask(_BroadPhaseLayerMask),
+
+		WP_PhysicsSystem::CastLayerMask(_ObjectLayerMask));
+
+	for (auto& result : results.mHits)
+	{
+		_hits.push_back(m_bodyToID.find(result.GetIndex())->second);
+	}
+
+	return results.mHits.size();
+}
+
+//multi casting functions
+
+bool	WP_PhysicsSystem::CastShape(
+	WP_ShapeCastResultCollector& _hits,					//out variable
+	WP_PhysicsShapeCastSetting _shapeCastSettings,
+	glm::vec3 _origin,
+	glm::vec3 _dirVector,
+	CastBPLayer _BroadPhaseLayerMask ,
+	CastLayer _ObjectLayerMask ,
+	CastIDMask const& _GameObjectIDMask) const
+{
+	using namespace WP_Physics;
+
+	_shapeCastSettings.m_shapeSettings.reset(nullptr);
+
+	switch (_shapeCastSettings.m_shape)	//get appropriate shape settings with default values
+	{
+	case WP_PhysicsShape::EMPTY:
+	case WP_PhysicsShape::NUM_PHYSICS_SHAPES:	//expected fall through
+		return false;
+	case WP_PhysicsShape::CUBE:
+		_shapeCastSettings.m_shapeSettings =
+			std::make_unique<JPH::BoxShapeSettings>(WP_Physics::ToJoltVec3(_shapeCastSettings.m_scale));
+		break;
+	case WP_PhysicsShape::SPHERE:
+	//create sphere with all avg scale
+		_shapeCastSettings.m_shapeSettings = std::make_unique<JPH::SphereShapeSettings>(_shapeCastSettings.m_scale.x);
+		break;
+	case WP_PhysicsShape::CAPSULE:
+		_shapeCastSettings.m_shapeSettings = std::make_unique<JPH::CapsuleShapeSettings>(_shapeCastSettings.m_scale.y, _shapeCastSettings.m_scale.x);
+		break;
+	case WP_PhysicsShape::CYLINDER:
+		_shapeCastSettings.m_shapeSettings = std::make_unique<JPH::CapsuleShapeSettings>(_shapeCastSettings.m_scale.y, _shapeCastSettings.m_scale.x);
+		break;
+	default:
+		assert(0 && "invalid shape type for physics component [%d]");
+		return  false;
+	};
+
+	_shapeCastSettings.m_shapeSettings->Create();				//create new shape based on current settings
+
+	JPH::AllHitCollisionCollector<JPH::CastShapeCollector> results;
+
+	//cast the shape
+	GetPhysicsNPQ().CastShape(
+		JPH::RShapeCast(_shapeCastSettings.m_shapeSettings->Create().Get(),
+			ToJoltVec3(_shapeCastSettings.m_scale),
+			ToJoltMat44(glm::translate(glm::mat4(1.0f), _origin)),
+			ToJoltVec3(_dirVector)),
+		JPH::ShapeCastSettings(),	//we use default settings here to ignore back faces. will however be less effecient for more shape accuracy. Adjust as required.
+		JPH::Vec3(0,0,0),
+		results,
+		WP_PhysicsSystem::CastBPMask(_BroadPhaseLayerMask),
+		WP_PhysicsSystem::CastLayerMask(_ObjectLayerMask),
+		WP_PhysicsSystem::CastIDFilter(_GameObjectIDMask));
+	for (auto& result : results.mHits) //move results to out variable
+	{
+		_hits.push_back(WP_CastShapeResult(result.mContactPointOn1 ,
+			result.mContactPointOn2 ,
+			result.mPenetrationAxis,
+			result.mFraction,
+			m_bodyToID.find(result.mBodyID2.GetIndex())->second));
+	}
+
+	return results.mHits.size();
+}
+
+bool WP_PhysicsSystem::CastShapeAgainstObject(
+	WP_CastShapeResult& _hit,
+	WP_GameObjectID _objectToCheck,
+	WP_PhysicsShapeCastSetting _shapeCastSettings,
+	glm::vec3 const& _origin,
+	glm::vec3 const& _dirVector) const
+{
+	using namespace WP_Physics;
+	OBTAIN_CONST_PHYSIC_COMPONENT(_objectToCheck);
+	if (!pComp) return false;
+
+	_shapeCastSettings.m_shapeSettings.reset(nullptr);
+
+	switch (_shapeCastSettings.m_shape)	//get appropriate shape settings with default values
+	{
+	case WP_PhysicsShape::EMPTY:
+	case WP_PhysicsShape::NUM_PHYSICS_SHAPES:	//expected fall through
+		return false;
+	case WP_PhysicsShape::CUBE:
+		_shapeCastSettings.m_shapeSettings = std::make_unique<JPH::BoxShapeSettings>(WP_Physics::ToJoltVec3(_shapeCastSettings.m_scale));
+		break;
+	case WP_PhysicsShape::SPHERE:
+		//create sphere with all avg scale
+		_shapeCastSettings.m_shapeSettings = std::make_unique<JPH::SphereShapeSettings>(_shapeCastSettings.m_scale.x);
+		break;
+	case WP_PhysicsShape::CAPSULE:
+		_shapeCastSettings.m_shapeSettings = std::make_unique<JPH::CapsuleShapeSettings>(_shapeCastSettings.m_scale.y, _shapeCastSettings.m_scale.x);
+		break;
+	case WP_PhysicsShape::CYLINDER:
+		_shapeCastSettings.m_shapeSettings = std::make_unique<JPH::CapsuleShapeSettings>(_shapeCastSettings.m_scale.y, _shapeCastSettings.m_scale.x);
+		break;
+	default:
+		assert(0 && "invalid shape type for physics component [%d]");
+		return false;
+	};
+
+
+	JPH::AllHitCollisionCollector<JPH::CastShapeCollector> results;
+
+	GetPhysicsBI().GetTransformedShape(pComp->m_bID).CastShape(
+		JPH::RShapeCast(_shapeCastSettings.m_shapeSettings->Create().Get(),
+			ToJoltVec3(_shapeCastSettings.m_scale),
+			ToJoltMat44(glm::translate(glm::mat4(1.f), _origin) * glm::mat4_cast(_shapeCastSettings.m_rotation)),
+			ToJoltVec3(_dirVector)),
+		JPH::ShapeCastSettings(),	//we use default settings here to ignore back faces. will however be less effecient for more shape accuracy. Adjust as required.
+		ToJoltVec3(_origin),
+		results
+	);
+
+	if (!(results.mHits.size())) { return false; }	//return if no hits.
+
+	_hit.m_collisionPoint1 = ToGLMVec3(results.mHits[0].mContactPointOn1) + _origin;
+	_hit.m_collisionPoint2 = ToGLMVec3(results.mHits[0].mContactPointOn2) + _origin;
+	_hit.m_pentrationNormal = glm::normalize(ToGLMVec3(results.mHits[0].mPenetrationAxis));
+	_hit.m_pentrationDepth = results.mHits[0].mFraction,
+	_hit.m_collidedGID = pComp->GetGameObjectID();
+
+	return true;
+}
+
+bool WP_PhysicsSystem::CollideShape(
+	WP_ShapeCastResultCollector& _hits,
+	WP_PhysicsShapeCastSetting _shapeCastSettings,
+	glm::vec3 _origin,
+	glm::vec3 _dirVector,
+	CastBPLayer _BroadPhaseLayerMask,
+	CastLayer _ObjectLayerMask,
+	CastIDMask const& _GameObjectIDMask) const
+{
+	using namespace WP_Physics;
+
+	_shapeCastSettings.m_shapeSettings.reset(nullptr);
+
+	switch (_shapeCastSettings.m_shape)	//get appropriate shape settings with default values
+	{
+	case WP_PhysicsShape::EMPTY:
+	case WP_PhysicsShape::NUM_PHYSICS_SHAPES:	//expected fall through
+		return false;
+	case WP_PhysicsShape::CUBE:
+		_shapeCastSettings.m_shapeSettings = std::make_unique<JPH::BoxShapeSettings>(WP_Physics::ToJoltVec3(_shapeCastSettings.m_scale));
+		break;
+	case WP_PhysicsShape::SPHERE:
+		//create sphere with all avg scale
+		_shapeCastSettings.m_shapeSettings = std::make_unique<JPH::SphereShapeSettings>(_shapeCastSettings.m_scale.x);
+		break;
+	case WP_PhysicsShape::CAPSULE:
+		_shapeCastSettings.m_shapeSettings = std::make_unique<JPH::CapsuleShapeSettings>(_shapeCastSettings.m_scale.y, _shapeCastSettings.m_scale.x);
+		break;
+	case WP_PhysicsShape::CYLINDER:
+		_shapeCastSettings.m_shapeSettings = std::make_unique<JPH::CapsuleShapeSettings>(_shapeCastSettings.m_scale.y, _shapeCastSettings.m_scale.x);
+		break;
+	default:
+		assert(0 && "invalid shape type for physics component [%d]");
+		return false;
+	};
+
+	_shapeCastSettings.m_shapeSettings->Create();				//create new shape based on current settings
+
+	JPH::AllHitCollisionCollector<JPH::CollideShapeCollector> results;
+
+	//cast the shape
+	GetPhysicsNPQ().CollideShape(
+		_shapeCastSettings.m_shapeSettings->Create().Get(),
+		ToJoltVec3(_shapeCastSettings.m_scale),
+		ToJoltMat44(glm::translate(glm::mat4(1.f), _origin) * glm::mat4_cast(_shapeCastSettings.m_rotation)),
+		JPH::CollideShapeSettings(),	//we use default settings here to ignore back faces. will however be less effecient for more shape accuracy. Adjust as required.
+		ToJoltVec3(_origin),
+		results,
+		WP_PhysicsSystem::CastBPMask(_BroadPhaseLayerMask),
+		WP_PhysicsSystem::CastLayerMask(_ObjectLayerMask),
+		WP_PhysicsSystem::CastIDFilter(_GameObjectIDMask));
+
+	for (auto& result : results.mHits) //move results to out variable
+	{
+		_hits.push_back(WP_CastShapeResult(result.mContactPointOn1 + ToJoltVec3(_origin),
+			result.mContactPointOn2 + ToJoltVec3(_origin),
+			result.mPenetrationAxis,
+			result.mPenetrationDepth,
+			m_bodyToID.find(result.mBodyID2.GetIndex())->second));
+	}
+
+	return results.mHits.size();
+}
+
+
 //Raycast enum mask operator Macros
 #ifndef DEFINE_ENUM_LOGIC_OPERATOR
 #define DEFINE_ENUM_LOGIC_OPERATOR(_Type,_op)																\
@@ -1456,9 +1984,24 @@ DEFINE_ENUM_LOGIC_ASSIGNMENT_OPERATOR(CastBPEnum, ^=, ^);
 //================================================================================
 //							Contact Listener functions
 //================================================================================
-
+#ifndef PHYSICS_CONTACT_SCENE_RELOAD_GUARD
 #define PHYSICS_CONTACT_SCENE_RELOAD_GUARD								\
 if (WP_PhysicsSystem::GetInstance()->m_isPhysicsReloaded) { return; }	\
+
+#endif
+
+#ifndef PHYSICS_CONTACT_ID_GUARD
+#define PHYSICS_CONTACT_ID_GUARD(_id1,_id2)												\
+if (_id1 == WP_INVALID_GAMEOBJECTID || _id2 == WP_INVALID_GAMEOBJECTID) { return; }		\
+
+#endif
+
+#ifndef PHYSICS_CONTACT_LIMIT_SIZE
+#define PHYSICS_CONTACT_LIMIT_SIZE( _vector , _maxSize)									\
+if ( _vector.size() >= _maxSize - 1 ) { return; }										\
+
+#endif
+
 
 using WP_CL = WP_PhysicsSystem::WP_ContactListener;
 
@@ -1473,6 +2016,7 @@ void			WP_CL::OnContactAdded(const JPH::Body& inBody1, const JPH::Body& inBody2,
 	const JPH::ContactManifold& inManifold, JPH::ContactSettings& ioSettings)
 {
 	PHYSICS_CONTACT_SCENE_RELOAD_GUARD
+	PHYSICS_CONTACT_LIMIT_SIZE(m_ContactAddedList,PHYSICS_CONTACT_LISTENER_CALLBACK_LIMIT)
 	auto physics = WP_PhysicsSystem::GetInstance();
 	m_ContactAddedList.emplace_back(
 		physics->GetIDfromBodyID(inBody1.GetID().GetIndex()),
@@ -1491,6 +2035,7 @@ void			WP_CL::OnContactPersisted(const JPH::Body& inBody1, const JPH::Body& inBo
 	const JPH::ContactManifold& inManifold, JPH::ContactSettings& ioSettings)
 {
 	PHYSICS_CONTACT_SCENE_RELOAD_GUARD
+	PHYSICS_CONTACT_LIMIT_SIZE(m_ContactPersistList, PHYSICS_CONTACT_LISTENER_CALLBACK_LIMIT)
 	auto physics = WP_PhysicsSystem::GetInstance();
 	m_ContactPersistList.emplace_back(
 		physics->GetIDfromBodyID(inBody1.GetID().GetIndex()),
@@ -1508,6 +2053,7 @@ void			WP_CL::OnContactPersisted(const JPH::Body& inBody1, const JPH::Body& inBo
 void			WP_CL::OnContactRemoved(const JPH::SubShapeIDPair& inSubShapePair)
 {
 	PHYSICS_CONTACT_SCENE_RELOAD_GUARD
+	PHYSICS_CONTACT_LIMIT_SIZE(m_ContactRemovedList, PHYSICS_CONTACT_LISTENER_CALLBACK_LIMIT)
 	auto physics = WP_PhysicsSystem::GetInstance();
 	m_ContactRemovedList.emplace_back(
 		physics->GetIDfromBodyID(inSubShapePair.GetBody1ID().GetIndex()),
@@ -1527,6 +2073,10 @@ void			WP_CL::CallbackAllContacts()
 	EventType currentType = EventType::kPhysicsContactTriggerDelayed;
 	auto notify = [&currentType](auto& _payload)
 		{
+			//if (reinterpret_cast<WP_ContactPayloadDelayed*>(&_payload)->m_gameObject1 == 2)
+			//{
+			//WP_INFO("a forest in trees");
+			//}
 			WP_EventSystem::GetInstance()->Notify(currentType, &_payload);
 #ifdef DEBUG_PHYS_CONTACT
 			switch (currentType)
@@ -1593,3 +2143,7 @@ void				WP_CL::ClearContacts()
 //================================================================================
 //						End of Contact Listener functions
 //================================================================================
+
+WP_PhysicsSystemObjectLayerPairFilter::WP_PhysicsSystemObjectLayerPairFilter(WP_PhysicsSystem& _parent)
+	: m_objectLayer{_parent.GetObjectLayerLogic()}
+{/*Empty by Design*/ }

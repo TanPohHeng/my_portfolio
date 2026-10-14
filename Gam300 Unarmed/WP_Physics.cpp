@@ -2,6 +2,7 @@
 #include <WP_EngineSystem/WP_PhysicsSystem.h>
 #include <WP_CoreComponents/WP_Transform3D.h>
 #include <WP_CoreComponents/WP_BoxCollider.h>
+#include <WP_ECS/WP_ECS.h>
 #include <utility>
 
 namespace {
@@ -124,13 +125,17 @@ RTTR_REGISTRATION
 			rttr::metadata(MetaDataTypes::DISABLE_ON_RUN_IMGUI,true),
 			rttr::metadata(MetaDataTypes::PHYSICS_SHAPE_SCALE,true)
 		)
-		//.property("m_layer", &WP_Physics3D::GetObjectLayer, &WP_Physics3D::SetObjectLayer)
+		.property("m_layer", &WP_Physics3D::GetObjectLayer, &WP_Physics3D::SetObjectLayer)
 		.property("m_active", &WP_Physics3D::GetIsActive, &WP_Physics3D::SetIsActive)
 		.property("m_pureStatic", &WP_Physics3D::GetIsPureStatic, &WP_Physics3D::SetIsPureStatic)
 		(
 			rttr::metadata(MetaDataTypes::DISABLE_ON_RUN_IMGUI,true)
 		)
 		QUICK_REGISTER_RTTR_PROPERTY("m_isTrigger",WP_Physics3D,GetIsTrigger,SetIsTrigger)
+		(
+			rttr::metadata(MetaDataTypes::DISABLE_ON_RUN_IMGUI,true)
+		)
+		QUICK_REGISTER_RTTR_PROPERTY("Kinematic_Collides_with_Non-dynamic",WP_Physics3D,GetKinematicVNonDynamic,SetKinematicVNonDynamic)
 		(
 			rttr::metadata(MetaDataTypes::DISABLE_ON_RUN_IMGUI,true)
 		)
@@ -143,6 +148,7 @@ RTTR_REGISTRATION
 		.property("m_gravity", &WP_Physics3D::GetGravityScale, &WP_Physics3D::SetGravityScale)
 		QUICK_REGISTER_RTTR_PROPERTY("m_friction",WP_Physics3D,GetFriction,SetFriction)
 		QUICK_REGISTER_RTTR_PROPERTY("m_restitution",WP_Physics3D,GetCOR,SetCOR)
+		QUICK_REGISTER_RTTR_PROPERTY("m_useGivenMass",WP_Physics3D,GetIsMassOverride, SetIsMassOverride)
 		QUICK_REGISTER_RTTR_PROPERTY("m_mass",WP_Physics3D,GetMass,SetMass)
 	;
 
@@ -228,17 +234,28 @@ WP_PhysicsShape operator--(WP_PhysicsShape& _shape, int)
 WP_Physics3D::WP_Physics3D()
 {}
 
-void WP_Physics3D::Init()
-{}
-
 void WP_Physics3D::OnEnabled()
 {
+	WP_Component::OnEnabled();
 	SetBodyActive();
 }
 
 void WP_Physics3D::OnDisabled()
 {
+	WP_Component::OnDisabled();
 	SetBodyUnactive();
+}
+
+
+/*!***********************************************************************
+\brief
+	Return the enabled state of this component.
+\return
+	true if this physics component is enabled. false otherwise.
+*************************************************************************/
+bool WP_Physics3D::IsEnabled() const noexcept
+{
+	return WP_ECS::IsComponentActive<WP_Physics3D>(GetGameObjectID());
 }
 
 WP_Physics3D::~WP_Physics3D()
@@ -262,7 +279,6 @@ WP_Physics3D& WP_Physics3D::operator=(WP_Physics3D&& _ref) noexcept
 
 	m_isActive = std::move(_ref.m_isActive);
 	m_isPureStatic = std::move(_ref.m_isPureStatic);
-	m_useTransformScale = std::move(_ref.m_useTransformScale);
 	m_isNPC = std::move(_ref.m_isNPC);
 	m_motionType = std::move(_ref.m_motionType);
 	m_shapeType = std::move(_ref.m_shapeType);
@@ -292,7 +308,6 @@ WP_Physics3D& WP_Physics3D::operator=(WP_Physics3D const& _ref)
 
 	m_isActive = _ref.m_isActive;
 	m_isPureStatic = _ref.m_isPureStatic;
-	m_useTransformScale = _ref.m_useTransformScale;
 	m_isNPC = _ref.m_isNPC;
 	m_motionType = _ref.m_motionType;
 	m_shapeType = _ref.m_shapeType;
@@ -387,20 +402,18 @@ void WP_Physics3D::SetMotionType(JPH::EMotionType _motionType)
 	{	//for now, switch between 2 layers for demo
 	case JPH::EMotionType::Static:
 		//bodyInterface.SetObjectLayer(m_bID,Layers::NON_MOVING);
-		m_objectLayer = Layers::NON_MOVING;
 		m_isActive = false;
 		m_isNPC = false;
 		break;
 	case JPH::EMotionType::Kinematic:
 		m_isNPC = false;
 	case JPH::EMotionType::Dynamic:			//expected fall through
-		m_objectLayer = Layers::MOVING;
 		SetIsTrigger(false);
 		break;
 	default:
 		break;
 	}
-#ifdef PHYSICS_ALLOW_RUNTIME_ADJUSTMENTS
+#ifndef PHYSICS_ALLOW_RUNTIME_ADJUSTMENTS
 	if (m_bID.GetIndexAndSequenceNumber() == JPH::BodyID::cInvalidBodyID)
 	{
 		return;
@@ -408,7 +421,6 @@ void WP_Physics3D::SetMotionType(JPH::EMotionType _motionType)
 
 	auto& bodyInterface = WP_PhysicsSystem::GetInstance()->GetPhysicsBI();
 	bodyInterface.SetMotionType(m_bID, _motionType, WP_ACTIVATION_IS_ACTIVE(bodyInterface.IsActive(m_bID)));
-	bodyInterface.SetObjectLayer(m_bID, m_objectLayer);
 #endif
 	}
 
@@ -420,16 +432,13 @@ JPH::ObjectLayer WP_Physics3D::GetObjectLayer() const
 }
 void WP_Physics3D::SetObjectLayer(JPH::ObjectLayer _objLayer)
 {
+	if (_objLayer >= JPH_OBJECT_LAYER_BITS) { return; }
 	m_objectLayer = _objLayer;
-#ifdef PHYSICS_ALLOW_RUNTIME_ADJUSTMENTS
 	if (m_bID.GetIndexAndSequenceNumber() != JPH::BodyID::cInvalidBodyID)
 	{
 		auto& bodyInterface = WP_PhysicsSystem::GetInstance()->GetPhysicsBI();
 		bodyInterface.SetObjectLayer(m_bID, _objLayer);
 	}
-#endif // PHYSICS_ALLOW_RUNTIME_ADJUSTMENTS
-
-
 }
 
 bool WP_Physics3D::GetIsActive() const
@@ -486,6 +495,8 @@ void WP_Physics3D::SetIsTrigger(bool _newBool)
 	if (m_motionType == JPH::EMotionType::Dynamic) { m_motionType = JPH::EMotionType::Kinematic; }
 	m_isNPC = false;
 }
+
+DEFINE_GETTER_SETTER(WP_Physics3D::GetKinematicVNonDynamic, WP_Physics3D::SetKinematicVNonDynamic, bool, m_KinematicCollideNonDynamic);
 
 //DEFINE_GETTER_SETTER(WP_Physics3D::GetIsNPC, WP_Physics3D::SetIsNPC, bool, m_isNPC)
 bool WP_Physics3D::GetIsNPC() const
@@ -639,6 +650,7 @@ glm::vec3 WP_Physics3D::CharacterGetRotattion() const
 //================================================
 void WP_Physics3D::AddBody()
 {
+	if (m_isEnabled) { return; }
 	auto* transComp = WP_ComponentList<WP_Transform3D>::GetComponentList()->GetComponent(GetGameObjectID());
 
 	WP_BoxCollider* boxComp = WP_ComponentList<WP_BoxCollider>::GetComponentList()->GetComponent(GetGameObjectID());
@@ -666,11 +678,22 @@ void WP_Physics3D::AddBody()
 			otherScale.x = otherScale.x / 2 * boxComp->m_scale.x;
 			otherScale.y = otherScale.y / 2 * boxComp->m_scale.y;
 			otherScale.z = otherScale.z / 2 * boxComp->m_scale.z;
-			shapeSettingsPtr = std::make_unique<JPH::BoxShapeSettings>(WP_Physics::ToJoltVec3(otherScale));
+
+			if (!(otherScale.x + otherScale.y + otherScale.z)) 
+			{
+				shapeSettingsPtr = std::make_unique<JPH::EmptyShapeSettings>();
+				m_shapeType = WP_PhysicsShape::EMPTY;							//reset to 
+			}
+			else
+				shapeSettingsPtr = std::make_unique<JPH::BoxShapeSettings>(WP_Physics::ToJoltVec3(otherScale));
 		}
 		else 
 		{
-			shapeSettingsPtr = std::make_unique<JPH::BoxShapeSettings>(WP_Physics::ToJoltVec3(m_shapeScale));
+			auto xyzScale = m_shapeScale;
+			xyzScale.x /= 2;
+			xyzScale.y /= 2;
+			xyzScale.z /= 2;
+			shapeSettingsPtr = std::make_unique<JPH::BoxShapeSettings>(WP_Physics::ToJoltVec3(xyzScale));
 		}
 #endif
 		
@@ -731,22 +754,36 @@ void WP_Physics3D::AddBody()
 		bodySettings.mAllowDynamicOrKinematic = true;			//allow switching within motion types
 		bodySettings.mAllowedDOFs = m_lockedAxis;
 	}
+	/*if (m_useMassOverride) 
+	{
+		JPH::MassProperties massStats;
+		massStats.mMass = m_mass;
+		bodySettings.mOverrideMassProperties = JPH::EOverrideMassProperties::CalculateInertia;
+		bodySettings.mMassPropertiesOverride = massStats;
+	}*/
 		
 	bodySettings.mIsSensor = m_isTrigger;
+	bodySettings.mCollideKinematicVsNonDynamic = m_KinematicCollideNonDynamic;
 	JPH::MassProperties massStats;
 	massStats.ScaleToMass(m_mass);
 	bodySettings.mMassPropertiesOverride = massStats;
+	if (m_useMassOverride)
+		bodySettings.mOverrideMassProperties = JPH::EOverrideMassProperties::MassAndInertiaProvided;
 
 	bodySettings.mGravityFactor = m_gravityScale;
 	bodySettings.mFriction = m_friction;
 	bodySettings.mRestitution = m_restitution;
-	
-	m_bID = WP_PhysicsSystem::GetInstance()->GetPhysicsBI().CreateAndAddBody(bodySettings, JPH::EActivation::Activate);
-	m_isInPhysicsSystem = true;
+
+	m_bID = WP_PhysicsSystem::GetInstance()->GetPhysicsBI().CreateBody(bodySettings)->GetID();
+	if(IsEnabled())
+		WP_PhysicsSystem::GetInstance()->GetPhysicsBI().AddBody(m_bID, JPH::EActivation::Activate);
+	m_isInPhysicsSystem = IsEnabled();
+
 	//std::cout <<"created with ID[" << (m_bID.GetIndex()) << "]\n";
 	//WP_WARN("created with ID[%d]\n",m_bID.GetIndex());
 	assert(!m_bID.IsInvalid());
 	WP_PhysicsSystem::GetInstance()->GetPhysicsBI().SetUserData(m_bID,GetGameObjectID());
+	m_isEnabled = true;
 }
 
 void WP_Physics3D::AddCharacter(JPH::ShapeSettings::ShapeResult const& _shape)
@@ -767,15 +804,19 @@ void WP_Physics3D::AddCharacter(JPH::ShapeSettings::ShapeResult const& _shape)
 		0,
 		&(WP_PhysicsSystem::GetInstance()->GetPhysicsSystem()));
 
-	m_charPtr->AddToPhysicsSystem();
-	m_isInPhysicsSystem = true;
+	if(IsEnabled())
+		m_charPtr->AddToPhysicsSystem(JPH::EActivation::Activate);
+	m_isInPhysicsSystem = IsEnabled();
+
 	m_bID = m_charPtr->GetBodyID();
 	assert(!m_bID.IsInvalid());
 	WP_PhysicsSystem::GetInstance()->GetPhysicsBI().SetUserData(m_bID, GetGameObjectID());
+	m_isEnabled = true;
 }
 
 void WP_Physics3D::RemoveBody() 
-{	
+{
+	if (!m_isEnabled) { return; }
 	if (m_bID.IsInvalid()) { return; }	//catch no create body
 	if (m_isNPC) { RemoveCharacter(); return; }					//special remove npc
 
@@ -787,6 +828,7 @@ void WP_Physics3D::RemoveBody()
 	//remove body from system, then destroy the body.
 	WP_PhysicsSystem::GetInstance()->GetPhysicsBI().DestroyBody(m_bID);
 	m_bID = (JPH::BodyID)JPH::BodyID::cInvalidBodyID;
+	m_isEnabled = false;
 }
 
 
@@ -803,11 +845,13 @@ void WP_Physics3D::RemoveCharacter()
 
 	assert(!m_bID.IsInvalid());
 	m_bID = (JPH::BodyID)JPH::BodyID::cInvalidBodyID;
+	m_isEnabled = false;
 }
 
 void WP_Physics3D::SuspendBody()
 {
 	SetBodyActive(false);
+	m_isInPhysicsSystem = false;
 }
 
 void WP_Physics3D::SetBodyActive(bool _active) 
@@ -839,7 +883,7 @@ void WP_Physics3D::SetBodyActive()
 
 void WP_Physics3D::SetBodyUnactive() 
 {
-	assert(m_isInPhysicsSystem && !m_bID.IsInvalid());			//debug mode assert
+	//assert(m_isInPhysicsSystem && !m_bID.IsInvalid());			//debug mode assert
 	if (!m_isInPhysicsSystem || m_bID.IsInvalid()) { return; }	//catch on release 
 	if (m_isNPC) {
 		assert(m_charPtr);
@@ -852,9 +896,10 @@ void WP_Physics3D::SetBodyUnactive()
 		WP_PhysicsSystem::GetInstance()->GetPhysicsBI().RemoveBody(m_bID);
 		m_isInPhysicsSystem = false;
 	}
+	
 }
 
-JPH::ObjectLayer GetObjectLayer(JPH::EMotionType _motionType) 
+JPH::ObjectLayer GetObjectLayerFromMotionType(JPH::EMotionType _motionType) 
 {
 	switch (_motionType)
 	{	//for now, switch between 2 layers for demo
